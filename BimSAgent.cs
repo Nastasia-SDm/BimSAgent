@@ -6,6 +6,36 @@ namespace BimSAgentApp;
 
 public sealed class BimSAgent : IDisposable
 {
+    private sealed record Message(
+        [property: System.Text.Json.Serialization.JsonPropertyName("role")] string Role,
+        [property: System.Text.Json.Serialization.JsonPropertyName("content")] string Content);
+
+    private static readonly JsonSerializerOptions HistoryOptions = new() { WriteIndented = true };
+    private readonly string _historyPath = Path.GetFullPath("history.json");
+    private List<Message> _history;
+
+    public BimSAgent()
+    {
+        try
+        {
+            _history = JsonSerializer.Deserialize<List<Message>>(File.ReadAllText(_historyPath))
+                ?? throw new JsonException();
+            if (_history.Any(message => message is null ||
+                message.Role is not ("user" or "assistant") || string.IsNullOrWhiteSpace(message.Content)))
+                throw new JsonException();
+        }
+        catch (FileNotFoundException)
+        {
+            _history = [];
+        }
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
+        {
+            _httpClient.Dispose();
+            throw new InvalidOperationException(
+                "Не удалось загрузить history.json. Проверьте формат JSON и доступ к файлу. Файл не изменён.");
+        }
+    }
+
     private const string Instructions = """
         Ты BimSAgent — AI-агент с глубокой специализацией на Autodesk Revit, BIM и Revit API.
         Ты понимаешь устройство Revit-моделей, метаданные, элементы, категории, семейства,
@@ -42,7 +72,7 @@ public sealed class BimSAgent : IDisposable
         {
             model = string.IsNullOrWhiteSpace(model) ? "gpt-4.1" : model.Trim(),
             instructions = Instructions,
-            input = prompt,
+            input = _history.Append(new Message("user", prompt)).ToArray(),
             store = false
         });
 
@@ -81,7 +111,40 @@ public sealed class BimSAgent : IDisposable
         var answer = string.Join(Environment.NewLine, parts);
         if (string.IsNullOrWhiteSpace(answer))
             throw new InvalidOperationException("OpenAI не вернул текстовый ответ.");
-        return answer.Replace(apiKey.Trim(), "[скрыто]", StringComparison.Ordinal);
+        answer = answer.Replace(apiKey.Trim(), "[скрыто]", StringComparison.Ordinal);
+        var updatedHistory = _history
+            .Append(new Message("user", prompt))
+            .Append(new Message("assistant", answer))
+            .Select(message => message with
+            {
+                Content = message.Content.Replace(apiKey.Trim(), "[скрыто]", StringComparison.Ordinal)
+            }).ToList();
+        SaveHistory(updatedHistory);
+        _history = updatedHistory;
+        return answer;
+    }
+
+    private void SaveHistory(List<Message> history)
+    {
+        var temporaryPath = _historyPath + ".tmp";
+        try
+        {
+            // Replace only after the entire JSON has been written successfully.
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(history, HistoryOptions));
+            File.Move(temporaryPath, _historyPath, overwrite: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                "Ответ получен, но сохранить history.json не удалось. Проверьте доступ к папке и свободное место. " +
+                "Новый обмен сообщениями не добавлен в контекст.");
+        }
+        finally
+        {
+            try { File.Delete(temporaryPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     public void Dispose() => _httpClient.Dispose();

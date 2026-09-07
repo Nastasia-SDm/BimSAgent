@@ -11,7 +11,18 @@ Console.CancelKeyPress += (_, e) =>
     shutdown.Cancel();
 };
 
-using var agent = new BimSAgent();
+BimSAgent loadedAgent;
+try
+{
+    loadedAgent = new BimSAgent();
+}
+catch (InvalidOperationException e)
+{
+    Console.Error.WriteLine(e.Message);
+    Environment.ExitCode = 1;
+    return;
+}
+using var agent = loadedAgent;
 Console.WriteLine("BimSAgent — помощник по Revit, BIM и Revit API.");
 Console.WriteLine("Введите запрос. Для выхода: /exit или Ctrl+C.");
 
