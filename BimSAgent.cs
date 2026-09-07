@@ -6,6 +6,10 @@ namespace BimSAgentApp;
 
 public sealed class BimSAgent : IDisposable
 {
+    public const string Model = "gpt-4.1-nano";
+    public sealed record TokenStatistics(int? UserInput, int? HistoryInput, int? TotalInput, int? Output);
+    public TokenStatistics? LastTokenStatistics { get; private set; }
+
     private sealed record Message(
         [property: System.Text.Json.Serialization.JsonPropertyName("role")] string Role,
         [property: System.Text.Json.Serialization.JsonPropertyName("content")] string Content);
@@ -40,6 +44,8 @@ public sealed class BimSAgent : IDisposable
         Ты BimSAgent — AI-агент с глубокой специализацией на Autodesk Revit, BIM и Revit API.
         Ты понимаешь устройство Revit-моделей, метаданные, элементы, категории, семейства,
         типы и экземпляры, параметры, геометрию, зависимости и связи между элементами.
+        Ты глубоко понимаешь внутренние механизмы Revit, зависимости между элементами,
+        механизмы их перестроения и возможные причины изменений элементов модели.
         Ты помогаешь разрабатывать и отлаживать C#-плагины и Dynamo через Revit API.
         Учитывай контекст выполнения Revit API, транзакции, единицы измерения,
         фильтрацию элементов, общие параметры, связанные модели и ограничения потоков.
@@ -59,21 +65,25 @@ public sealed class BimSAgent : IDisposable
 
     public async Task<string> AskAsync(string prompt, CancellationToken cancellationToken = default)
     {
+        LastTokenStatistics = null;
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("Задайте переменную окружения OPENAI_API_KEY перед отправкой запроса.");
 
-        var model = Environment.GetEnvironmentVariable("OPENAI_MODEL");
+        var userTokens = await TryCountTokensAsync([new Message("user", prompt)], apiKey, cancellationToken);
+        int? historyTokens = _history.Count == 0 ? 0 :
+            await TryCountTokensAsync(_history.ToArray(), apiKey, cancellationToken);
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses");
         // The key is used only for authentication and is never written to disk or logs.
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
         request.Content = JsonContent.Create(new
         {
-            model = string.IsNullOrWhiteSpace(model) ? "gpt-4.1" : model.Trim(),
+            model = Model,
             instructions = Instructions,
             input = _history.Append(new Message("user", prompt)).ToArray(),
-            store = false
+            store = false,
+            truncation = "disabled"
         });
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
@@ -121,7 +131,95 @@ public sealed class BimSAgent : IDisposable
             }).ToList();
         SaveHistory(updatedHistory);
         _history = updatedHistory;
+        var hasUsage = root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object;
+        LastTokenStatistics = new TokenStatistics(userTokens, historyTokens,
+            hasUsage && usage.TryGetProperty("input_tokens", out var inputTokens) ? inputTokens.GetInt32() : null,
+            hasUsage && usage.TryGetProperty("output_tokens", out var outputTokens) ? outputTokens.GetInt32() : null);
         return answer;
+    }
+
+    private async Task<int?> TryCountTokensAsync(Message[] input, string apiKey, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await CountTokensAsync(input, apiKey, null, cancellationToken);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return null; }
+        catch (Exception e) when (e is HttpRequestException or JsonException or InvalidOperationException)
+        {
+            // A counting failure must not prevent a normal answer or invent a token estimate.
+            return null;
+        }
+    }
+
+    private async Task<int> CountTokensAsync(Message[] input, string apiKey, string? instructions,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses/input_tokens");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
+        request.Content = JsonContent.Create(new { model = Model, input, instructions });
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Подсчёт токенов недоступен: HTTP {(int)response.StatusCode}.");
+        using var json = await JsonDocument.ParseAsync(
+            await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+        if (!json.RootElement.TryGetProperty("input_tokens", out var count) ||
+            !count.TryGetInt32(out var tokens) || tokens < 0)
+            throw new JsonException();
+        return tokens;
+    }
+
+    public async Task<string> RunContextLimitTestAsync(CancellationToken cancellationToken = default)
+    {
+        const int targetTokens = 1_050_000;
+        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+        if (string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException("Задайте переменную окружения OPENAI_API_KEY перед тестом.");
+
+        // Repeated text is just a starting point; the API verifies the actual count,
+        // including the unchanged instructions and message framing, before generation.
+        var repetitions = targetTokens;
+        Message[] input = [];
+        var verifiedTokens = 0;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var text = string.Concat(Enumerable.Repeat(" a", repetitions));
+            input = [new Message("user", text)];
+            verifiedTokens = await CountTokensAsync(input, apiKey, Instructions, cancellationToken);
+            if (verifiedTokens == targetTokens)
+                break;
+            repetitions = checked(repetitions + targetTokens - verifiedTokens);
+            if (repetitions <= 0 || repetitions > targetTokens * 2)
+                break;
+        }
+        if (verifiedTokens != targetTokens)
+            throw new InvalidOperationException("Не удалось подтвердить контекст ровно в 1 050 000 токенов. Тестовый запрос не отправлен.");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
+        request.Content = JsonContent.Create(new
+        {
+            model = Model, instructions = Instructions, input,
+            truncation = "disabled", store = false, max_output_tokens = 16
+        });
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        var summary = $"Вход: {verifiedTokens:N0} токенов (подтверждено API); лимит модели: 1 047 576.\n";
+        if (response.IsSuccessStatusCode)
+            return summary + "API неожиданно принял запрос. Ошибка переполнения не подтверждена.";
+
+        using var json = await JsonDocument.ParseAsync(
+            await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+        if (json.RootElement.TryGetProperty("error", out var error) &&
+            error.TryGetProperty("code", out var code) && code.GetString() == "context_length_exceeded")
+        {
+            var message = error.TryGetProperty("message", out var detail) ? detail.GetString() ?? "" : "";
+            message = message.Replace(apiKey.Trim(), "[скрыто]", StringComparison.Ordinal);
+            return summary + $"HTTP {(int)response.StatusCode}: context_length_exceeded\n{message}";
+        }
+        // Other errors may contain authentication details; don't print their raw bodies.
+        return summary + $"HTTP {(int)response.StatusCode}: получена другая ошибка API. " +
+            "Переполнение контекста не подтверждено; проверьте доступ к модели и лимиты аккаунта.";
     }
 
     private void SaveHistory(List<Message> history)
