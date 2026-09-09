@@ -4,3 +4,7 @@ obj/
 *.user
 history.json
 history.json.tmp
+summary-*.json
+summary-*.json.tmp
+memory-pending.json
+memory-pending.json.tmp
