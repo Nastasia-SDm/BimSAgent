@@ -2,6 +2,10 @@ bin/
 obj/
 .env
 *.user
+facts.json
+facts.json.tmp
+context-state.json
+context-state.json.tmp
 history.json
 history.json.tmp
 summary-*.json

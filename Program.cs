@@ -23,22 +23,12 @@ catch (InvalidOperationException e)
     return;
 }
 using var agent = loadedAgent;
-try
-{
-    await agent.InitializeAsync(shutdown.Token);
-}
-catch (Exception e) when (e is InvalidOperationException or HttpRequestException or
-    OperationCanceledException or System.Text.Json.JsonException)
-{
-    Console.Error.WriteLine(e is InvalidOperationException ? e.Message :
-        "Не удалось сжать историю при запуске. Исходная история сохранена; повторите запуск.");
-    Environment.ExitCode = 1;
-    return;
-}
 Console.WriteLine("BimSAgent — помощник по Revit, BIM и Revit API.");
 Console.WriteLine("Введите запрос. Для выхода: /exit или Ctrl+C.");
 Console.WriteLine($"Модель: {BimSAgent.Model}. Тест лимита контекста: context-limit-test.");
 Console.WriteLine("Создать технический prompt по задаче: generate-prompt.");
+Console.WriteLine("strategy sliding-window|sticky-facts|branching; checkpoint; branch create <name>; branch switch <name>");
+Console.WriteLine(agent.ContextStatus);
 
 while (!shutdown.IsCancellationRequested)
 {
@@ -60,10 +50,17 @@ while (!shutdown.IsCancellationRequested)
 
     try
     {
+        if (agent.TryHandleContextCommand(input, out var commandResult))
+        {
+            Console.WriteLine(commandResult);
+            continue;
+        }
         if (input.Trim().Equals("context-limit-test", StringComparison.OrdinalIgnoreCase))
         {
+            var options = await ReadOptionsAsync(shutdown.Token);
+            if (options is null) break;
             Console.WriteLine("Подготовка и проверка контекста 1 050 000 токенов через API...");
-            Console.WriteLine(await agent.RunContextLimitTestAsync(shutdown.Token));
+            Console.WriteLine(await agent.RunContextLimitTestAsync(options.Value.Tokens, options.Value.Temperature, shutdown.Token));
             continue;
         }
         if (input.Trim().Equals("generate-prompt", StringComparison.OrdinalIgnoreCase))
@@ -77,29 +74,23 @@ while (!shutdown.IsCancellationRequested)
                 Console.WriteLine("Задача не введена. Команда отменена.");
                 continue;
             }
-            int tokenLimit;
-            while (true)
-            {
-                Console.WriteLine("Сколько токенов может потратить LLM на создание prompt?");
-                Console.Write("Лимит токенов (16–32768): ");
-                var limitInput = await Console.In.ReadLineAsync(shutdown.Token);
-                if (limitInput is null || limitInput.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
-                    return;
-                if (int.TryParse(limitInput, out tokenLimit) && tokenLimit is >= 16 and <= 32768)
-                    break;
-                Console.WriteLine("Введите целое число от 16 до 32768.");
-            }
-            Console.WriteLine(await agent.GeneratePromptAsync(task, tokenLimit, shutdown.Token));
+            if (!await UpdateFactsIfNeededAsync(agent, task, shutdown.Token)) break;
+            var options = await ReadOptionsAsync(shutdown.Token);
+            if (options is null) break;
+            Console.WriteLine(await agent.GeneratePromptAsync(task, options.Value.Tokens, options.Value.Temperature, shutdown.Token));
         }
         else
         {
-            Console.WriteLine($"\nАгент: {await agent.AskAsync(input, shutdown.Token)}");
+            if (!await UpdateFactsIfNeededAsync(agent, input, shutdown.Token)) break;
+            var options = await ReadOptionsAsync(shutdown.Token);
+            if (options is null) break;
+            Console.WriteLine($"\nАгент: {await agent.AskAsync(input, options.Value.Tokens, options.Value.Temperature, shutdown.Token)}");
         }
         if (agent.LastTokenStatistics is { } tokens)
         {
             static string Format(int? count) => count?.ToString("N0") ?? "недоступно (API не вернул счётчик)";
             Console.WriteLine($"Токены текущего запроса (со служебным оформлением): {Format(tokens.UserInput)}");
-            Console.WriteLine($"Токены предыдущей истории (summary + последние сообщения, без нового запроса и роли): {Format(tokens.HistoryInput)}");
+            Console.WriteLine($"Токены контекста выбранной стратегии (без нового запроса и роли): {Format(tokens.HistoryInput)}");
             Console.WriteLine($"Весь вход, включая роль, историю и запрос (usage.input_tokens): {Format(tokens.TotalInput)}");
             Console.WriteLine($"Токены ответа (usage.output_tokens): {Format(tokens.Output)}");
         }
@@ -123,5 +114,45 @@ while (!shutdown.IsCancellationRequested)
     catch (System.Text.Json.JsonException)
     {
         Console.Error.WriteLine("OpenAI вернул ответ в неожиданном формате.");
+    }
+}
+
+static async Task<bool> UpdateFactsIfNeededAsync(BimSAgent agent, string message, CancellationToken cancellationToken)
+{
+    if (agent.Strategy != "sticky-facts") return true;
+    Console.WriteLine("Параметры отдельного запроса для обновления долгосрочных фактов:");
+    var options = await ReadOptionsAsync(cancellationToken);
+    if (options is null) return false;
+    Console.WriteLine(await agent.UpdateFactsAsync(message, options.Value.Tokens, options.Value.Temperature, cancellationToken));
+    if (agent.LastTokenStatistics is { } usage)
+        Console.WriteLine($"Токены извлечения фактов: вход {usage.TotalInput?.ToString() ?? "недоступно"}, ответ {usage.Output?.ToString() ?? "недоступно"}.");
+    Console.WriteLine("Параметры основного ответа:");
+    return true;
+}
+
+static async Task<(int Tokens, double Temperature)?> ReadOptionsAsync(CancellationToken cancellationToken)
+{
+    int tokens;
+    while (true)
+    {
+        Console.Write("Максимальное количество токенов для ответа (16–32768): ");
+        var input = await Console.In.ReadLineAsync(cancellationToken);
+        if (input is null || input.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (int.TryParse(input, out tokens) && tokens is >= 16 and <= 32768)
+            break;
+        Console.WriteLine("Введите целое число от 16 до 32768.");
+    }
+    while (true)
+    {
+        Console.Write("Temperature (0–2): ");
+        var input = await Console.In.ReadLineAsync(cancellationToken);
+        if (input is null || input.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (double.TryParse(input.Trim().Replace(',', '.'), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var temperature) &&
+            double.IsFinite(temperature) && temperature is >= 0 and <= 2)
+            return (tokens, temperature);
+        Console.WriteLine("Введите число от 0 до 2, например 0.7 или 0,7.");
     }
 }
