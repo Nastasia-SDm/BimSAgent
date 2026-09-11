@@ -29,6 +29,7 @@ Console.WriteLine($"Модель: {BimSAgent.Model}. Тест лимита ко�
 Console.WriteLine("Создать технический prompt по задаче: generate-prompt.");
 Console.WriteLine("strategy sliding-window|sticky-facts|branching; checkpoint; branch create <name>; branch switch <name>");
 Console.WriteLine(agent.ContextStatus);
+Console.WriteLine("memory <id> move from <source> to <target>; memory <id> delete from <source>");
 
 while (!shutdown.IsCancellationRequested)
 {
@@ -94,6 +95,27 @@ while (!shutdown.IsCancellationRequested)
             Console.WriteLine($"Весь вход, включая роль, историю и запрос (usage.input_tokens): {Format(tokens.TotalInput)}");
             Console.WriteLine($"Токены ответа (usage.output_tokens): {Format(tokens.Output)}");
         }
+        Console.WriteLine("Параметры отдельного запроса для обновления трёх типов памяти (/exit — выход):");
+        var memoryOptions = await ReadOptionsAsync(shutdown.Token);
+        if (memoryOptions is null) break;
+        Console.WriteLine(await agent.UpdateMemoryAsync(memoryOptions.Value.Tokens, memoryOptions.Value.Temperature, shutdown.Token));
+        if (agent.LastTokenStatistics is { } memoryUsage)
+            Console.WriteLine($"Токены обновления памяти: вход {memoryUsage.TotalInput?.ToString() ?? "недоступно"}, ответ {memoryUsage.Output?.ToString() ?? "недоступно"}.");
+        while (agent.PendingMemoryDescription is { } description)
+        {
+            Console.WriteLine(description);
+            Console.WriteLine("Не уверен, куда сохранить эту информацию. Выберите: short / working / long / skip:");
+            var choice = await Console.In.ReadLineAsync(shutdown.Token);
+            if (choice is null || choice.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return;
+            try
+            {
+                agent.ResolvePendingMemory(choice);
+            }
+            catch (InvalidOperationException e)
+            {
+                Console.Error.WriteLine(e.Message);
+            }
+        }
     }
     catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
     {
@@ -114,6 +136,10 @@ while (!shutdown.IsCancellationRequested)
     catch (System.Text.Json.JsonException)
     {
         Console.Error.WriteLine("OpenAI вернул ответ в неожиданном формате.");
+    }
+    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+    {
+        Console.Error.WriteLine("Не удалось записать память. Проверьте доступ к файлам; перезапуск восстановит незавершённую запись.");
     }
 }
 

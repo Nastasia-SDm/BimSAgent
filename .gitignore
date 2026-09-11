@@ -4,6 +4,14 @@ obj/
 *.user
 facts.json
 facts.json.tmp
+short-term-memory.json
+working-memory.json
+long-term-memory.json
+short-term-memory.json.tmp
+working-memory.json.tmp
+long-term-memory.json.tmp
+memory-update-pending.json
+memory-update-pending.json.tmp
 context-state.json
 context-state.json.tmp
 history.json
