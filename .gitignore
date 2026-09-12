@@ -2,6 +2,7 @@ bin/
 obj/
 .env
 *.user
+.memory-backups/
 facts.json
 facts.json.tmp
 short-term-memory.json

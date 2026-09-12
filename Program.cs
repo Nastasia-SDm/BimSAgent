@@ -95,10 +95,7 @@ while (!shutdown.IsCancellationRequested)
             Console.WriteLine($"Весь вход, включая роль, историю и запрос (usage.input_tokens): {Format(tokens.TotalInput)}");
             Console.WriteLine($"Токены ответа (usage.output_tokens): {Format(tokens.Output)}");
         }
-        Console.WriteLine("Параметры отдельного запроса для обновления трёх типов памяти (/exit — выход):");
-        var memoryOptions = await ReadOptionsAsync(shutdown.Token);
-        if (memoryOptions is null) break;
-        Console.WriteLine(await agent.UpdateMemoryAsync(memoryOptions.Value.Tokens, memoryOptions.Value.Temperature, shutdown.Token));
+        Console.WriteLine(await agent.UpdateMemoryAsync(shutdown.Token));
         if (agent.LastTokenStatistics is { } memoryUsage)
             Console.WriteLine($"Токены обновления памяти: вход {memoryUsage.TotalInput?.ToString() ?? "недоступно"}, ответ {memoryUsage.Output?.ToString() ?? "недоступно"}.");
         while (agent.PendingMemoryDescription is { } description)
@@ -114,6 +111,10 @@ while (!shutdown.IsCancellationRequested)
             catch (InvalidOperationException e)
             {
                 Console.Error.WriteLine(e.Message);
+            }
+            catch (System.Text.Json.JsonException e)
+            {
+                Console.Error.WriteLine($"Запись не сохранена: {e.Message}");
             }
         }
     }
