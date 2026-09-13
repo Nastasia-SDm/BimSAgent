@@ -30,6 +30,7 @@ Console.WriteLine("Создать технический prompt по задач�
 Console.WriteLine("strategy sliding-window|sticky-facts|branching; checkpoint; branch create <name>; branch switch <name>");
 Console.WriteLine(agent.ContextStatus);
 Console.WriteLine("memory <id> move from <source> to <target>; memory <id> delete from <source>");
+Console.WriteLine("profile create <name>; profile use <name>; profile show; profile list; profile skip");
 
 while (!shutdown.IsCancellationRequested)
 {
@@ -51,6 +52,27 @@ while (!shutdown.IsCancellationRequested)
 
     try
     {
+        var profileParts = input.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (profileParts[0].Equals("profile", StringComparison.OrdinalIgnoreCase))
+        {
+            if (profileParts.Length == 3 && profileParts[1].Equals("create", StringComparison.OrdinalIgnoreCase))
+            {
+                agent.CheckNewProfileName(profileParts[2]);
+                Console.WriteLine("Опишите Style (как вы хотите, чтобы агент отвечал вам: кратко/подробно, формально/разговорно, с примерами кода или без):");
+                var style = await Console.In.ReadLineAsync(shutdown.Token);
+                if (style is null || style.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) break;
+                Console.WriteLine("Опишите Constraints (какие правила и ограничения агент должен соблюдать при ответах вам):");
+                var constraints = await Console.In.ReadLineAsync(shutdown.Token);
+                if (constraints is null || constraints.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) break;
+                Console.WriteLine("Опишите Context (кто вы, зачем используете агента, над каким проектом работаете и какой результат хотите получать):");
+                var context = await Console.In.ReadLineAsync(shutdown.Token);
+                if (context is null || context.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) break;
+                agent.CreateProfile(profileParts[2], style, constraints, context);
+                Console.WriteLine("Профиль создан. Для активации используйте profile use <name>.");
+            }
+            else Console.WriteLine(agent.HandleProfileCommand(input));
+            continue;
+        }
         if (agent.TryHandleContextCommand(input, out var commandResult))
         {
             Console.WriteLine(commandResult);

@@ -2,6 +2,7 @@ bin/
 obj/
 .env
 *.user
+profiles/*.json
 .memory-backups/
 facts.json
 facts.json.tmp

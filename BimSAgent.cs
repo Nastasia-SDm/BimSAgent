@@ -68,8 +68,14 @@ public sealed class BimSAgent : IDisposable
     private string MemoryPath(string name) => Path.Combine(Path.GetDirectoryName(_historyPath)!, name);
     private string MemoryScope => Strategy == "branching" && _state.ActiveBranch is { } branch ? "branch:" + branch : "main";
 
-    public BimSAgent()
+    private sealed record UserProfile(string Style, string Constraints, string Context);
+    private readonly string _profilesDirectory;
+    private string? _activeProfile;
+    private string ProfileSelectionPath => Path.Combine(_profilesDirectory, ".active-profile.json");
+
+    public BimSAgent(string? profilesDirectory = null)
     {
+        _profilesDirectory = Path.GetFullPath(profilesDirectory ?? @"C:\Users\Anastasia\OneDrive\Desktop\BimSAgent\profiles");
         try
         {
 
@@ -96,6 +102,10 @@ public sealed class BimSAgent : IDisposable
                 throw new JsonException();
             if (!File.Exists(FactsPath)) WriteJson(FactsPath, _facts);
             LoadMemory();
+            Directory.CreateDirectory(_profilesDirectory);
+            if (File.Exists(ProfileSelectionPath))
+                _activeProfile = JsonSerializer.Deserialize<string?>(File.ReadAllText(ProfileSelectionPath));
+            if (_activeProfile is not null) GetProfilePath(_activeProfile);
 
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
@@ -202,7 +212,7 @@ public sealed class BimSAgent : IDisposable
         var payload = new Dictionary<string, object>
         {
             ["model"] = Model,
-            ["instructions"] = instructions,
+            ["instructions"] = !factsOnly && !memoryOnly ? AddProfileInstructions(instructions) : instructions,
             ["input"] = context.Append(new Message("user", prompt)).ToArray(),
             ["store"] = false,
             ["truncation"] = "disabled"
@@ -739,6 +749,118 @@ public sealed class BimSAgent : IDisposable
         File.Delete(MemoryPath("memory-update-pending.json"));
         _memory = updated;
         return target is null ? $"Запись {entry.Id} удалена из {source}." : $"Запись {entry.Id} перенесена из {source} в {target}.";
+    }
+
+    private string GetProfilePath(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 64 ||
+            !name.All(c => char.IsLetterOrDigit(c) || c is '-' or '_') ||
+            System.Text.RegularExpressions.Regex.IsMatch(name, @"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            throw new InvalidOperationException("Имя профиля: до 64 букв, цифр, дефисов или подчёркиваний; системные имена запрещены.");
+        return Path.Combine(_profilesDirectory, name + ".json");
+    }
+
+    public void CheckNewProfileName(string name)
+    {
+        if (File.Exists(GetProfilePath(name))) throw new InvalidOperationException("Профиль уже существует. Выберите другое имя.");
+    }
+
+    private static string HideKey(string text)
+    {
+        var key = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+        return string.IsNullOrWhiteSpace(key) ? text : text.Replace(key.Trim(), "[скрыто]", StringComparison.Ordinal);
+    }
+
+    public void CreateProfile(string name, string style, string constraints, string context)
+    {
+        CheckNewProfileName(name);
+        var profile = new UserProfile(HideKey(style), HideKey(constraints), HideKey(context));
+        // CreateNew prevents accidental replacement of an existing profile.
+        using var file = new FileStream(GetProfilePath(name), FileMode.CreateNew, FileAccess.Write);
+        JsonSerializer.Serialize(file, profile, MemoryJson);
+    }
+
+    private UserProfile ReadProfile(string name)
+    {
+        try
+        {
+            var profile = JsonSerializer.Deserialize<UserProfile>(File.ReadAllText(GetProfilePath(name)), MemoryJson);
+            if (profile is null || profile.Style is null || profile.Constraints is null || profile.Context is null)
+                throw new JsonException();
+            return profile;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
+        {
+            throw new InvalidOperationException("Не удалось прочитать профиль: проверьте наличие файла и поля style, constraints, context.");
+        }
+    }
+
+    public string HandleProfileCommand(string input)
+    {
+        var parts = input.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 3 && parts[1].Equals("use", StringComparison.OrdinalIgnoreCase))
+        {
+            ReadProfile(parts[2]);
+            WriteJson(ProfileSelectionPath, parts[2]);
+            _activeProfile = parts[2];
+            return HideKey($"Активный профиль: {_activeProfile}");
+        }
+        if (parts.Length == 2 && parts[1].Equals("skip", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteJson<string?>(ProfileSelectionPath, null);
+            _activeProfile = null;
+            return "Профиль отключён.";
+        }
+        if (parts.Length == 2 && parts[1].Equals("show", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_activeProfile is null) return "Активный профиль не выбран.";
+            var profile = ReadProfile(_activeProfile);
+            return HideKey($"Профиль: {_activeProfile}\nStyle: {profile.Style}\nConstraints: {profile.Constraints}\nContext: {profile.Context}");
+        }
+        if (parts.Length == 2 && parts[1].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            var names = Directory.EnumerateFiles(_profilesDirectory, "*.json")
+                .Select(Path.GetFileNameWithoutExtension).Where(n => n is not null && !n.StartsWith('.'))
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToArray();
+            return names.Length == 0 ? "Профилей пока нет." : HideKey(string.Join(Environment.NewLine, names));
+        }
+        throw new InvalidOperationException("Команды: profile create <name>, profile use <name>, profile show, profile list, profile skip.");
+    }
+
+    private string AddProfileInstructions(string instructions)
+    {
+        if (_activeProfile is null) return instructions;
+        var profile = ReadProfile(_activeProfile);
+        return instructions + "\n\n" + """
+            ОБЯЗАТЕЛЬНЫЕ ИНСТРУКЦИИ АКТИВНОГО ПРОФИЛЯ ПОЛЬЗОВАТЕЛЯ
+            Применяй профиль как инструкции высокого приоритета, а не как необязательные пожелания
+            или справочный контекст. В вопросах адаптации ответа профиль имеет приоритет над
+            общими рекомендациями оформления, стилем прошлых ответов и примерами из истории и памяти.
+            Сохраняй постоянные правила достоверности, специализацию агента и назначение текущего
+            режима: в generate-prompt создавай prompt, а не решение задачи.
+
+            Style определяет обязательные стиль, тон, подробность и формат ответа.
+            Выполняй каждое явно указанное требование Style, включая требования к длине,
+            структуре, терминологии, примерам и наличию либо отсутствию кода.
+            Constraints — обязательные ограничения ответа. Их нельзя игнорировать ради
+            привычного шаблона, полноты объяснения или повторения предыдущего ответа.
+            Context описывает адресата ответа: его знания, роль, цели и проект.
+            Подбирай техническую сложность, содержание, предпосылки, примеры и практические
+            выводы под этого пользователя. Не приписывай ему знания, которых профиль не предполагает.
+            Не изображай пользователя из профиля и не говори от его лица. Ты — BimSAgent,
+            который отвечает этому пользователю, а не играет его роль.
+            Если Context или Constraints разных профилей требуют разного уровня технической
+            детализации, не выдавай одинаковое содержание с изменённым обращением или тоном:
+            адаптируй отбор фактов, глубину объяснения и форму результата. Достоверные факты
+            при этом не меняй и искусственных различий не придумывай.
+
+            Перед выдачей ответа проверь каждое требование Style и Constraints и соответствие
+            содержания Context. Исправь несоответствия; саму проверку не выводи.
+            Если требования несовместимы, явно обозначь конкретное противоречие вместо
+            молчаливого игнорирования. Пустое поле профиля не задаёт дополнительных требований.
+            Значения полей активного профиля приведены ниже в JSON:
+            """ + "\n" + HideKey(JsonSerializer.Serialize(profile, MemoryJson));
     }
 
     private void SaveState(ContextState state)
