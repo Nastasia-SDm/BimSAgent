@@ -31,6 +31,7 @@ Console.WriteLine("strategy sliding-window|sticky-facts|branching; checkpoint; b
 Console.WriteLine(agent.ContextStatus);
 Console.WriteLine("memory <id> move from <source> to <target>; memory <id> delete from <source>");
 Console.WriteLine("profile create <name>; profile use <name>; profile show; profile list; profile skip");
+Console.WriteLine("task create <name>; task open <id>; task pause");
 
 while (!shutdown.IsCancellationRequested)
 {
@@ -53,6 +54,13 @@ while (!shutdown.IsCancellationRequested)
     try
     {
         var profileParts = input.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (profileParts[0].Equals("task", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine(agent.HandleTaskCommand(input));
+            if (profileParts.Length == 3 && profileParts[1].Equals("open", StringComparison.OrdinalIgnoreCase) && agent.HasUnfinishedTask)
+                if (!await RunTaskWorkflowAsync(agent, agent.TaskResumeInput, shutdown.Token)) break;
+            continue;
+        }
         if (profileParts[0].Equals("profile", StringComparison.OrdinalIgnoreCase))
         {
             if (profileParts.Length == 3 && profileParts[1].Equals("create", StringComparison.OrdinalIgnoreCase))
@@ -102,6 +110,11 @@ while (!shutdown.IsCancellationRequested)
             if (options is null) break;
             Console.WriteLine(await agent.GeneratePromptAsync(task, options.Value.Tokens, options.Value.Temperature, shutdown.Token));
         }
+        else if (agent.HasUnfinishedTask)
+        {
+            if (!await RunTaskWorkflowAsync(agent, input, shutdown.Token)) break;
+            continue;
+        }
         else
         {
             if (!await UpdateFactsIfNeededAsync(agent, input, shutdown.Token)) break;
@@ -109,36 +122,7 @@ while (!shutdown.IsCancellationRequested)
             if (options is null) break;
             Console.WriteLine($"\nАгент: {await agent.AskAsync(input, options.Value.Tokens, options.Value.Temperature, shutdown.Token)}");
         }
-        if (agent.LastTokenStatistics is { } tokens)
-        {
-            static string Format(int? count) => count?.ToString("N0") ?? "недоступно (API не вернул счётчик)";
-            Console.WriteLine($"Токены текущего запроса (со служебным оформлением): {Format(tokens.UserInput)}");
-            Console.WriteLine($"Токены контекста выбранной стратегии (без нового запроса и роли): {Format(tokens.HistoryInput)}");
-            Console.WriteLine($"Весь вход, включая роль, историю и запрос (usage.input_tokens): {Format(tokens.TotalInput)}");
-            Console.WriteLine($"Токены ответа (usage.output_tokens): {Format(tokens.Output)}");
-        }
-        Console.WriteLine(await agent.UpdateMemoryAsync(shutdown.Token));
-        if (agent.LastTokenStatistics is { } memoryUsage)
-            Console.WriteLine($"Токены обновления памяти: вход {memoryUsage.TotalInput?.ToString() ?? "недоступно"}, ответ {memoryUsage.Output?.ToString() ?? "недоступно"}.");
-        while (agent.PendingMemoryDescription is { } description)
-        {
-            Console.WriteLine(description);
-            Console.WriteLine("Не уверен, куда сохранить эту информацию. Выберите: short / working / long / skip:");
-            var choice = await Console.In.ReadLineAsync(shutdown.Token);
-            if (choice is null || choice.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return;
-            try
-            {
-                agent.ResolvePendingMemory(choice);
-            }
-            catch (InvalidOperationException e)
-            {
-                Console.Error.WriteLine(e.Message);
-            }
-            catch (System.Text.Json.JsonException e)
-            {
-                Console.Error.WriteLine($"Запись не сохранена: {e.Message}");
-            }
-        }
+        if (!await ReportResponseAsync(agent, shutdown.Token)) break;
     }
     catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
     {
@@ -173,8 +157,6 @@ static async Task<bool> UpdateFactsIfNeededAsync(BimSAgent agent, string message
     var options = await ReadOptionsAsync(cancellationToken);
     if (options is null) return false;
     Console.WriteLine(await agent.UpdateFactsAsync(message, options.Value.Tokens, options.Value.Temperature, cancellationToken));
-    if (agent.LastTokenStatistics is { } usage)
-        Console.WriteLine($"Токены извлечения фактов: вход {usage.TotalInput?.ToString() ?? "недоступно"}, ответ {usage.Output?.ToString() ?? "недоступно"}.");
     Console.WriteLine("Параметры основного ответа:");
     return true;
 }
@@ -204,4 +186,92 @@ static async Task<(int Tokens, double Temperature)?> ReadOptionsAsync(Cancellati
             return (tokens, temperature);
         Console.WriteLine("Введите число от 0 до 2, например 0.7 или 0,7.");
     }
+}
+
+static async Task<bool> RunTaskWorkflowAsync(BimSAgent agent, string input, CancellationToken cancellationToken)
+{
+    while (agent.HasUnfinishedTask)
+    {
+        if (agent.TaskAwaitingChoice)
+            Console.WriteLine(agent.SavedTaskAnswer);
+        else
+        {
+        if (!await UpdateFactsIfNeededAsync(agent, input, cancellationToken)) return false;
+        var options = await ReadOptionsAsync(cancellationToken);
+        if (options is null) return false;
+        Console.WriteLine(await agent.RunTaskTurnAsync(input, options.Value.Tokens, options.Value.Temperature, cancellationToken));
+        // Preserve the existing token reporting and memory update after every answer.
+        if (!await ReportResponseAsync(agent, cancellationToken)) return false;
+        }
+        var stage = agent.ActiveTaskStage;
+        int choice;
+        while (true)
+        {
+            Console.WriteLine("Для паузы: task pause");
+            Console.WriteLine(BimSAgent.FormatTaskChoices(stage));
+            var answer = await Console.In.ReadLineAsync(cancellationToken);
+            if (answer is null || answer.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return false;
+            if (answer.Trim().Equals("task pause", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine(agent.HandleTaskCommand(answer));
+                return true;
+            }
+            if (int.TryParse(answer, out choice) && choice >= 1 && choice <= (stage == "PLANNING" ? 3 : 2)) break;
+            Console.WriteLine("Введите номер одного из предложенных вариантов.");
+        }
+        var corrections = "";
+        if ((stage == "PLANNING" && choice == 3) || (stage != "PLANNING" && choice == 2))
+        {
+            while (true)
+            {
+                Console.WriteLine("Введите корректировки или замечания:");
+                var answer = await Console.In.ReadLineAsync(cancellationToken);
+                if (answer is null || answer.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return false;
+                if (answer.Trim().Equals("task pause", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine(agent.HandleTaskCommand(answer));
+                    return true;
+                }
+                if (!string.IsNullOrWhiteSpace(answer)) { corrections = answer; break; }
+                Console.WriteLine("Замечания не должны быть пустыми.");
+            }
+        }
+        input = agent.ApplyTaskChoice(choice, corrections);
+    }
+    Console.WriteLine(BimSAgent.FormatTaskOutput("DONE", "Задача завершена."));
+    return true;
+}
+
+static async Task<bool> ReportResponseAsync(BimSAgent agent, CancellationToken cancellationToken)
+{
+        if (agent.LastTokenStatistics is { } tokens)
+        {
+            static string Format(int? count) => count?.ToString("N0") ?? "недоступно (API не вернул счётчик)";
+            Console.WriteLine($"Токены запроса: {Format(tokens.TotalInput)}");
+            Console.WriteLine($"Токены ответа: {Format(tokens.Output)}");
+        }
+        var memoryReport = await agent.UpdateMemoryAsync(cancellationToken);
+        // Hide routine summaries, but keep explicit per-entry failures visible.
+        foreach (var error in memoryReport.Split(Environment.NewLine).Skip(1))
+            Console.Error.WriteLine(error);
+        while (agent.PendingMemoryDescription is { } description)
+        {
+            Console.WriteLine(description);
+            Console.WriteLine("Не уверен, куда сохранить эту информацию. Выберите: short / working / long / skip:");
+            var choice = await Console.In.ReadLineAsync(cancellationToken);
+            if (choice is null || choice.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return false;
+            try
+            {
+                agent.ResolvePendingMemory(choice);
+            }
+            catch (InvalidOperationException e)
+            {
+                Console.Error.WriteLine(e.Message);
+            }
+            catch (System.Text.Json.JsonException e)
+            {
+                Console.Error.WriteLine($"Запись не сохранена: {e.Message}");
+            }
+        }
+    return true;
 }

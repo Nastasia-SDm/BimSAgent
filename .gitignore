@@ -3,6 +3,7 @@ obj/
 .env
 *.user
 profiles/*.json
+tasks/
 .memory-backups/
 facts.json
 facts.json.tmp
