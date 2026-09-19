@@ -29,7 +29,7 @@ Console.WriteLine($"Модель: {BimSAgent.Model}. Тест лимита ко�
 Console.WriteLine("Создать технический prompt по задаче: generate-prompt.");
 Console.WriteLine("strategy sliding-window|sticky-facts|branching; checkpoint; branch create <name>; branch switch <name>");
 Console.WriteLine(agent.ContextStatus);
-Console.WriteLine("memory <id> move from <source> to <target>; memory <id> delete from <source>");
+Console.WriteLine("memory optimize; memory <id> move from <source> to <target>; memory <id> delete from <source>");
 Console.WriteLine("profile create <name>; profile use <name>; profile show; profile list; profile skip");
 Console.WriteLine("task create <name>; task open <id>; task pause");
 
@@ -79,6 +79,16 @@ while (!shutdown.IsCancellationRequested)
                 Console.WriteLine("Профиль создан. Для активации используйте profile use <name>.");
             }
             else Console.WriteLine(agent.HandleProfileCommand(input));
+            continue;
+        }
+        var memoryCommandParts = input.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (memoryCommandParts.Length == 2 &&
+            memoryCommandParts[0].Equals("memory", StringComparison.OrdinalIgnoreCase) &&
+            memoryCommandParts[1].Equals("optimize", StringComparison.OrdinalIgnoreCase))
+        {
+            var options = await ReadOptionsAsync(shutdown.Token);
+            if (options is null) break;
+            Console.WriteLine(await agent.OptimizeMemoryAsync(options.Value.Tokens, options.Value.Temperature, shutdown.Token));
             continue;
         }
         if (agent.TryHandleContextCommand(input, out var commandResult))
@@ -232,7 +242,16 @@ static async Task<bool> RunTaskWorkflowAsync(BimSAgent agent, string input, Canc
                     Console.WriteLine(agent.HandleTaskCommand(answer));
                     return true;
                 }
-                if (!string.IsNullOrWhiteSpace(answer)) { corrections = answer; break; }
+                if (!string.IsNullOrWhiteSpace(answer))
+                {
+                    if (!await agent.IsTaskCorrectionAllowedAsync(choice, answer, cancellationToken))
+                    {
+                        Console.WriteLine("Этап нельзя пропустить: требуется последовательный переход. Введите корректировку без пропуска обязательных этапов.");
+                        continue;
+                    }
+                    corrections = answer;
+                    break;
+                }
                 Console.WriteLine("Замечания не должны быть пустыми.");
             }
         }
