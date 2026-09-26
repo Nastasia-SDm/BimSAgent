@@ -33,6 +33,7 @@ Console.WriteLine("memory optimize; memory <id> move from <source> to <target>; 
 Console.WriteLine("profile create <name>; profile use <name>; profile show; profile list; profile skip");
 Console.WriteLine("task create <name>; task open <id>; task pause");
 Console.WriteLine("mcp-tools — список инструментов локального MCP-сервера");
+Console.WriteLine("mcp-call <tool-name> — прямой вызов инструмента MCP без аргументов");
 
 while (!shutdown.IsCancellationRequested)
 {

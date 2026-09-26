@@ -1,4 +1,6 @@
 using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace BimSAgentApp;
@@ -9,9 +11,16 @@ internal static class McpCommands
 
     public static async Task HandleAsync(string command, CancellationToken cancellationToken)
     {
-        if (!command.Equals("mcp-tools", StringComparison.OrdinalIgnoreCase))
+        var parts = command.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var isCall = parts.Length > 0 && parts[0].Equals("mcp-call", StringComparison.OrdinalIgnoreCase);
+        if (isCall && parts.Length != 2)
         {
-            Console.WriteLine("Неизвестная MCP-команда. Доступна: mcp-tools.");
+            Console.WriteLine("Использование: mcp-call <tool-name>");
+            return;
+        }
+        if (!isCall && !command.Equals("mcp-tools", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("Неизвестная MCP-команда. Доступны: mcp-tools; mcp-call <tool-name>.");
             return;
         }
         try
@@ -33,6 +42,22 @@ internal static class McpCommands
                 StandardErrorLines = _ => { }
             });
             await using var client = await McpClient.CreateAsync(transport, cancellationToken: timeout.Token);
+            if (isCall)
+            {
+                var result = await client.CallToolAsync(parts[1], new Dictionary<string, object?>(),
+                    cancellationToken: timeout.Token);
+                if (result.IsError == true)
+                    Console.WriteLine("MCP: инструмент вернул ошибку.");
+                foreach (var content in result.Content)
+                    Console.WriteLine(SafeText(content is TextContentBlock text
+                        ? text.Text
+                        : JsonSerializer.Serialize(content)));
+                if (result.StructuredContent is { } structured)
+                    Console.WriteLine(SafeText(structured.ToString()));
+                if (result.Content.Count == 0 && result.StructuredContent is null)
+                    Console.WriteLine("MCP: инструмент вернул пустой результат.");
+                return;
+            }
             var tools = await client.ListToolsAsync(cancellationToken: timeout.Token);
             if (tools.Count == 0)
                 Console.WriteLine("MCP подключён, tools пока нет.");
@@ -43,11 +68,13 @@ internal static class McpCommands
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (OperationCanceledException) { Console.WriteLine("MCP: время подключения истекло."); }
+        catch (OperationCanceledException) { Console.WriteLine("MCP: время ожидания ответа истекло."); }
         catch (Exception)
         {
             // Protocol/process exception messages can contain server output or secrets.
-            Console.WriteLine("MCP: не удалось получить tools. Проверьте сервер и его сборку Debug/net10.0.");
+            Console.WriteLine(isCall
+                ? "MCP: не удалось вызвать инструмент. Проверьте имя инструмента, сервер и его сборку Debug/net10.0."
+                : "MCP: не удалось получить tools. Проверьте сервер и его сборку Debug/net10.0.");
         }
     }
 

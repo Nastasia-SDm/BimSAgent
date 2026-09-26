@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>BIM-S</Name>
+    <Assembly>C:\Users\Anastasia\OneDrive\Desktop\BimSAgent\RevitAddin\bin\Release\net48\BimS.Revit2024.dll</Assembly>
+    <AddInId>6C76DFD4-92B7-4DE1-B72B-E3B42E0284EF</AddInId>
+    <FullClassName>BimS.Revit2024.Application</FullClassName>
+    <VendorId>BIMS</VendorId>
+    <VendorDescription>BIM-S</VendorDescription>
+  </AddIn>
+</RevitAddIns>
