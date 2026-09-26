@@ -32,6 +32,7 @@ Console.WriteLine(agent.ContextStatus);
 Console.WriteLine("memory optimize; memory <id> move from <source> to <target>; memory <id> delete from <source>");
 Console.WriteLine("profile create <name>; profile use <name>; profile show; profile list; profile skip");
 Console.WriteLine("task create <name>; task open <id>; task pause");
+Console.WriteLine("mcp-tools — список инструментов локального MCP-сервера");
 
 while (!shutdown.IsCancellationRequested)
 {
@@ -39,7 +40,7 @@ while (!shutdown.IsCancellationRequested)
     string? input;
     try
     {
-        input = await Console.In.ReadLineAsync(shutdown.Token);
+        input = await ReadUserInputAsync(shutdown.Token);
     }
     catch (OperationCanceledException)
     {
@@ -67,13 +68,13 @@ while (!shutdown.IsCancellationRequested)
             {
                 agent.CheckNewProfileName(profileParts[2]);
                 Console.WriteLine("Опишите Style (как вы хотите, чтобы агент отвечал вам: кратко/подробно, формально/разговорно, с примерами кода или без):");
-                var style = await Console.In.ReadLineAsync(shutdown.Token);
+                var style = await ReadUserInputAsync(shutdown.Token);
                 if (style is null || style.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) break;
                 Console.WriteLine("Опишите Constraints (какие правила и ограничения агент должен соблюдать при ответах вам):");
-                var constraints = await Console.In.ReadLineAsync(shutdown.Token);
+                var constraints = await ReadUserInputAsync(shutdown.Token);
                 if (constraints is null || constraints.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) break;
                 Console.WriteLine("Опишите Context (кто вы, зачем используете агента, над каким проектом работаете и какой результат хотите получать):");
-                var context = await Console.In.ReadLineAsync(shutdown.Token);
+                var context = await ReadUserInputAsync(shutdown.Token);
                 if (context is null || context.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) break;
                 agent.CreateProfile(profileParts[2], style, constraints, context);
                 Console.WriteLine("Профиль создан. Для активации используйте profile use <name>.");
@@ -107,7 +108,7 @@ while (!shutdown.IsCancellationRequested)
         if (input.Trim().Equals("generate-prompt", StringComparison.OrdinalIgnoreCase))
         {
             Console.Write("Задача: ");
-            var task = await Console.In.ReadLineAsync(shutdown.Token);
+            var task = await ReadUserInputAsync(shutdown.Token);
             if (task is null || task.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
                 break;
             if (string.IsNullOrWhiteSpace(task))
@@ -177,7 +178,7 @@ static async Task<(int Tokens, double Temperature)?> ReadOptionsAsync(Cancellati
     while (true)
     {
         Console.Write("Максимальное количество токенов для ответа (16–32768): ");
-        var input = await Console.In.ReadLineAsync(cancellationToken);
+        var input = await ReadUserInputAsync(cancellationToken);
         if (input is null || input.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
             return null;
         if (int.TryParse(input, out tokens) && tokens is >= 16 and <= 32768)
@@ -187,7 +188,7 @@ static async Task<(int Tokens, double Temperature)?> ReadOptionsAsync(Cancellati
     while (true)
     {
         Console.Write("Temperature (0–2): ");
-        var input = await Console.In.ReadLineAsync(cancellationToken);
+        var input = await ReadUserInputAsync(cancellationToken);
         if (input is null || input.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase))
             return null;
         if (double.TryParse(input.Trim().Replace(',', '.'), System.Globalization.NumberStyles.Float,
@@ -219,7 +220,7 @@ static async Task<bool> RunTaskWorkflowAsync(BimSAgent agent, string input, Canc
         {
             Console.WriteLine("Для паузы: task pause");
             Console.WriteLine(BimSAgent.FormatTaskChoices(stage));
-            var answer = await Console.In.ReadLineAsync(cancellationToken);
+            var answer = await ReadUserInputAsync(cancellationToken);
             if (answer is null || answer.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return false;
             if (answer.Trim().Equals("task pause", StringComparison.OrdinalIgnoreCase))
             {
@@ -235,7 +236,7 @@ static async Task<bool> RunTaskWorkflowAsync(BimSAgent agent, string input, Canc
             while (true)
             {
                 Console.WriteLine("Введите корректировки или замечания:");
-                var answer = await Console.In.ReadLineAsync(cancellationToken);
+                var answer = await ReadUserInputAsync(cancellationToken);
                 if (answer is null || answer.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return false;
                 if (answer.Trim().Equals("task pause", StringComparison.OrdinalIgnoreCase))
                 {
@@ -277,7 +278,7 @@ static async Task<bool> ReportResponseAsync(BimSAgent agent, CancellationToken c
         {
             Console.WriteLine(description);
             Console.WriteLine("Не уверен, куда сохранить эту информацию. Выберите: short / working / long / skip:");
-            var choice = await Console.In.ReadLineAsync(cancellationToken);
+            var choice = await ReadUserInputAsync(cancellationToken);
             if (choice is null || choice.Trim().Equals("/exit", StringComparison.OrdinalIgnoreCase)) return false;
             try
             {
@@ -293,4 +294,16 @@ static async Task<bool> ReportResponseAsync(BimSAgent agent, CancellationToken c
             }
         }
     return true;
+}
+
+static async Task<string?> ReadUserInputAsync(CancellationToken cancellationToken)
+{
+    while (true)
+    {
+        var input = await Console.In.ReadLineAsync(cancellationToken);
+        if (input is null || !input.TrimStart().StartsWith("mcp-", StringComparison.OrdinalIgnoreCase))
+            return input;
+        await McpCommands.HandleAsync(input.Trim(), cancellationToken);
+        Console.Write("Продолжите ввод: ");
+    }
 }
