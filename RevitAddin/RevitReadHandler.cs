@@ -19,6 +19,8 @@ namespace BimS.Revit2024
         private string scope;
         private string collection;
         private string documentSession;
+        private bool includeDocumentSession;
+        private long[] elementIds;
         private readonly List<KeyValuePair<Document, SessionIdentity>> documentSessions =
             new List<KeyValuePair<Document, SessionIdentity>>();
         private sealed class SessionIdentity { public readonly string Id = Guid.NewGuid().ToString("N"); }
@@ -164,13 +166,15 @@ namespace BimS.Revit2024
             string requestedScope;
             string requestedCollection;
             string requestedSession = null;
+            bool requestedEnvelope = false;
+            long[] requestedIds = null;
             BuiltInCategory[] requestedCategories = null;
             var requestedProperties = new Dictionary<BuiltInCategory, PropertyRequest[]>();
             try
             {
                 var input = Serializer().DeserializeObject(json) as Dictionary<string, object>;
-                if (input == null ||input.Keys.Any(k => k != "collection" && k != "fields" && k != "scope" && k != "categories" && k != "propertyRequests" && k != "documentSession") || !input.ContainsKey("collection") ||
-                    !(Equals(input["collection"], "elements") || Equals(input["collection"], "document")) || !input.ContainsKey("fields") ||
+                if (input == null ||input.Keys.Any(k => k != "collection" && k != "fields" && k != "scope" && k != "categories" && k != "propertyRequests" && k != "documentSession" && k != "includeDocumentSession" && k != "elementIds") || !input.ContainsKey("collection") ||
+                    !(Equals(input["collection"], "elements") || Equals(input["collection"], "document") || Equals(input["collection"], "elementParameters")) || !input.ContainsKey("fields") ||
                     !(input["fields"] is object[] values) || values.Length == 0 ||
                     values.Any(v => !(v is string)))
                     return Error("Ожидаются collection: elements и непустой массив fields.");
@@ -183,6 +187,23 @@ namespace BimS.Revit2024
                     requestedSession = id;
                 }
                 requestedScope = (string)input["scope"];
+                if (input.TryGetValue("includeDocumentSession", out var envelope))
+                {
+                    if (!(envelope is bool flag) || requestedCollection != "elements")
+                        return Error("includeDocumentSession допустим только как bool для elements.");
+                    requestedEnvelope = flag;
+                }
+                if (requestedCollection == "elementParameters")
+                {
+                    if (requestedScope != "document" || requestedSession == null ||
+                        input.ContainsKey("categories") || input.ContainsKey("propertyRequests") ||
+                        !input.TryGetValue("elementIds", out var ids) || !(ids is object[] idValues) ||
+                        idValues.Length == 0 || idValues.Length > 100 ||
+                        idValues.Any(v => !(v is int || v is long) || Convert.ToInt64(v) <= 0))
+                        return Error("elementParameters требует documentSession, scope: document и 1–100 положительных целых elementIds.");
+                    requestedIds = idValues.Select(Convert.ToInt64).Distinct().ToArray();
+                }
+                else if (input.ContainsKey("elementIds")) return Error("elementIds допустим только для elementParameters.");
                 if (input.TryGetValue("categories", out var categoryInput))
                 {
                     if (!(categoryInput is object[] categoryValues) || categoryValues.Length == 0)
@@ -198,7 +219,7 @@ namespace BimS.Revit2024
                     requestedCategories = parsed.ToArray();
                 }
                 requested = values.Cast<string>().Distinct(StringComparer.Ordinal).ToArray();
-                if (requestedCollection == "document" ? requested.Any(f => f != "SessionId") : requested.Any(f => f != "ElementId" && f != "Category" && f != "Name" && f != "FamilyName" && f != "TypeName" && f != "SystemProperties"))
+                if (requestedCollection == "elementParameters" ? requested.Any(f => !new[] { "ElementId", "Category", "FamilyName", "TypeName", "TypeId", "InstanceParameters", "TypeParameters" }.Contains(f)) : requestedCollection == "document" ? requested.Any(f => f != "SessionId") : requested.Any(f => f != "ElementId" && f != "Category" && f != "Name" && f != "FamilyName" && f != "TypeName" && f != "SystemProperties"))
                     return Error("Поддерживаются только ElementId, Category, Name, FamilyName, TypeName, SystemProperties.");
                 if (input.TryGetValue("propertyRequests", out var properties)) requestedProperties = ParseProperties(properties);
             }
@@ -220,6 +241,8 @@ namespace BimS.Revit2024
                         scope = requestedScope;
                         collection = requestedCollection;
                         documentSession = requestedSession;
+                        includeDocumentSession = requestedEnvelope;
+                        elementIds = requestedIds;
                         categories = requestedCategories;
                         propertyRequests = requestedProperties;
                         try
@@ -260,6 +283,13 @@ namespace BimS.Revit2024
                     }
                     if (collection == "document")
                     { pending.TrySetResult(Serializer().Serialize(new { SessionId = sessionId })); return; }
+                    if (collection == "elementParameters")
+                    {
+                        var exported = ReadElementParameters(document);
+                        pending.TrySetResult(Serializer().Serialize(exported));
+                        NamedPipeBridge.Diagnostic("execute.complete");
+                        return;
+                    }
                     var rows = new List<Dictionary<string, object>>();
                     var activeView = scope == "activeView" ? application.ActiveUIDocument.ActiveView : null;
                     if (scope == "activeView" && (activeView == null || !FilteredElementCollector.IsViewValidForElementIteration(document, activeView.Id)))
@@ -310,7 +340,7 @@ namespace BimS.Revit2024
                             rows.Add(row);
                         }
                     }
-                    pending.TrySetResult(Serializer().Serialize(rows));
+                    pending.TrySetResult(Serializer().Serialize(includeDocumentSession ? (object)new { documentSession = sessionId, elements = rows } : rows));
                     NamedPipeBridge.Diagnostic("execute.complete");
                 }
                 catch (Exception ex)
@@ -321,6 +351,168 @@ namespace BimS.Revit2024
             }
         }
 
+        private static readonly Dictionary<long, string[]> BuiltInNames = Enum.GetNames(typeof(BuiltInParameter))
+            .GroupBy(name => (long)(BuiltInParameter)Enum.Parse(typeof(BuiltInParameter), name))
+            .Where(group => group.Key != (long)BuiltInParameter.INVALID)
+            .ToDictionary(group => group.Key, group => group.OrderBy(name => name, StringComparer.Ordinal).ToArray());
+
+        private static object ReadError(string operation, Exception exception) =>
+            new { operation, message = "Ошибка Revit API: " + exception.GetType().Name };
+
+        private void CheckReadCancellation()
+        {
+            if (pending.Task.IsCompleted) throw new OperationCanceledException();
+        }
+
+        private object[] ReadParameters(Element owner, string source, List<object> ownerErrors)
+        {
+            var parameters = new Dictionary<long, Parameter>();
+            Action<Parameter> add = parameter =>
+            {
+                if (parameter?.Definition is InternalDefinition definition &&
+                    definition.BuiltInParameter != BuiltInParameter.INVALID)
+                    parameters[parameter.Id.Value] = parameter;
+            };
+            try
+            {
+                foreach (Parameter parameter in owner.Parameters)
+                {
+                    CheckReadCancellation();
+                    try { add(parameter); }
+                    catch (Exception ex) { ownerErrors.Add(ReadError("parameter.definition", ex)); }
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { ownerErrors.Add(ReadError(source + ".Parameters", ex)); }
+
+            foreach (var builtIn in BuiltInNames.Keys)
+            {
+                CheckReadCancellation();
+                try { add(owner.get_Parameter((BuiltInParameter)builtIn)); }
+                catch (Exception ex) { ownerErrors.Add(ReadError(source + ".get_Parameter:" + builtIn, ex)); }
+            }
+
+            var result = new List<object>();
+            foreach (var pair in parameters.OrderBy(item => item.Key))
+            {
+                CheckReadCancellation();
+                var parameter = pair.Value;
+                var errors = new List<object>();
+                var row = new Dictionary<string, object>
+                {
+                    ["parameterId"] = pair.Key,
+                    ["builtInParameterNames"] = BuiltInNames.TryGetValue(pair.Key, out var aliases) ? aliases : new string[0],
+                    ["name"] = null, ["source"] = source, ["ownerElementId"] = owner.Id.Value,
+                    ["storageType"] = null, ["hasValue"] = null, ["isReadOnly"] = null,
+                    ["dataTypeId"] = null, ["rawValue"] = null, ["displayValue"] = null,
+                    ["unitTypeId"] = null, ["convertedValue"] = null, ["status"] = "ok", ["errors"] = errors
+                };
+                Action<string, Action> read = (operation, action) =>
+                {
+                    try { action(); }
+                    catch (Exception ex) { errors.Add(ReadError(operation, ex)); }
+                };
+                read("name", () => row["name"] = parameter.Definition.Name);
+                read("isReadOnly", () => row["isReadOnly"] = parameter.IsReadOnly);
+                ForgeTypeId spec = null;
+                read("dataTypeId", () => { spec = parameter.Definition.GetDataType(); row["dataTypeId"] = spec?.TypeId; });
+                StorageType storage = StorageType.None;
+                bool hasValue = false;
+                bool valueRead = false;
+                read("storageType", () => { storage = parameter.StorageType; row["storageType"] = storage.ToString(); });
+                read("hasValue", () => { hasValue = parameter.HasValue; row["hasValue"] = hasValue; });
+                if (hasValue && storage != StorageType.None)
+                {
+                    read("rawValue", () =>
+                    {
+                        switch (storage)
+                        {
+                            case StorageType.Double:
+                                var number = parameter.AsDouble();
+                                if (double.IsNaN(number) || double.IsInfinity(number)) throw new InvalidOperationException();
+                                row["rawValue"] = number; break;
+                            case StorageType.Integer: row["rawValue"] = parameter.AsInteger(); break;
+                            case StorageType.String: row["rawValue"] = parameter.AsString(); break;
+                            case StorageType.ElementId: row["rawValue"] = parameter.AsElementId().Value; break;
+                        }
+                        valueRead = true;
+                    });
+                    if (storage == StorageType.Double || storage == StorageType.Integer)
+                        read("displayValue", () => row["displayValue"] = parameter.AsValueString());
+                    else if (storage == StorageType.String) row["displayValue"] = row["rawValue"];
+                    if (storage == StorageType.Double && spec != null)
+                        read("units", () =>
+                        {
+                            if (!UnitUtils.IsMeasurableSpec(spec)) return;
+                            var unit = parameter.GetUnitTypeId();
+                            row["unitTypeId"] = unit.TypeId;
+                            if (valueRead)
+                            {
+                                var converted = UnitUtils.ConvertFromInternalUnits((double)row["rawValue"], unit);
+                                if (double.IsNaN(converted) || double.IsInfinity(converted)) throw new InvalidOperationException();
+                                row["convertedValue"] = converted;
+                            }
+                        });
+                }
+                row["status"] = errors.Count != 0 ? (valueRead ? "partial" : "error") :
+                    !hasValue || storage == StorageType.None ? "noValue" : "ok";
+                result.Add(row);
+            }
+            return result.ToArray();
+        }
+
+        private object ReadElementParameters(Document document)
+        {
+            var rows = new List<object>();
+            var typeCache = new Dictionary<long, KeyValuePair<object[], List<object>>>();
+            foreach (var id in elementIds)
+            {
+                CheckReadCancellation();
+                var errors = new List<object>();
+                var row = new Dictionary<string, object> { ["ElementId"] = id, ["status"] = "ok", ["errors"] = errors };
+                try
+                {
+                    var element = document.GetElement(new ElementId(id));
+                    if (element == null) { row["status"] = "notFound"; rows.Add(row); continue; }
+                    var type = document.GetElement(element.GetTypeId()) as ElementType;
+                    foreach (var field in fields)
+                    {
+                        try
+                        {
+                            switch (field)
+                            {
+                                case "ElementId": break;
+                                case "Category": row[field] = element.Category?.Name; break;
+                                case "FamilyName": row[field] = type?.FamilyName; break;
+                                case "TypeName": row[field] = type?.Name; break;
+                                case "TypeId": row[field] = type == null ? (object)null : type.Id.Value; break;
+                                case "InstanceParameters": row[field] = ReadParameters(element, "instance", errors); break;
+                                case "TypeParameters":
+                                    if (type == null) { row[field] = new object[0]; break; }
+                                    if (!typeCache.TryGetValue(type.Id.Value, out var cached))
+                                    {
+                                        var typeErrors = new List<object>();
+                                        cached = new KeyValuePair<object[], List<object>>(ReadParameters(type, "type", typeErrors), typeErrors);
+                                        typeCache.Add(type.Id.Value, cached);
+                                    }
+                                    row[field] = cached.Key;
+                                    errors.AddRange(cached.Value);
+                                    break;
+                            }
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { row[field] = null; errors.Add(ReadError(field, ex)); }
+                    }
+                    bool parameterErrors = row.Values.OfType<object[]>().SelectMany(value => value)
+                        .OfType<Dictionary<string, object>>().Any(value => (string)value["status"] == "error" || (string)value["status"] == "partial");
+                    if (errors.Count != 0 || parameterErrors) row["status"] = "partial";
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { errors.Add(ReadError("element", ex)); row["status"] = "error"; }
+                rows.Add(row);
+            }
+            return rows;
+        }
         public string GetName() => "BIM-S: чтение документа";
         public void Dispose()
         {
