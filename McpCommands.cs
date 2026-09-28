@@ -7,30 +7,162 @@ namespace BimSAgentApp;
 
 internal static class McpCommands
 {
-    private const string ServerDirectory = @"D:\BIM-S-MCP\BIM-S_MCP-Server";
-    // Retained only in this CLI process, independently of the short-lived MCP process.
-    private static (long[] ElementIds, string DocumentSession)? lastElements;
-    private static string? lastParametersFile;
+    private sealed class ServerState(string directory, string assemblyName)
+    {
+        public string Directory { get; } = directory;
+        public string AssemblyName { get; } = assemblyName;
+        public (long[] ElementIds, string DocumentSession)? LastElements;
+        public string? LastParametersFile;
+    }
+    private static readonly ServerState Server1 = new(@"D:\BIM-S-MCP-1\BIM-S_MCP-Server", "BIM-S_MCP-Server");
+    private static readonly ServerState Server2 = new(@"D:\BIM-S-MCP-2\BIM-S_MCP-Server-2", "BIM-S_MCP-Server-2");
+    private static readonly ServerState Server3 = new(@"D:\BIM-S-MCP-3\BIM-S_MCP-Server-3", "BIM-S_MCP-Server-3");
+    public sealed record ToolInfo(
+    string Server,
+    string Name,
+    string Description,
+    string InputSchema);
 
+    public sealed record ToolResult(
+        string Server,
+        string Tool,
+        bool IsError,
+        string Text,
+        string? StructuredContent);
+
+    private static ServerState GetServer(string server) => server.ToLowerInvariant() switch
+    {
+        "mcp1" => Server1,
+        "mcp2" => Server2,
+        "mcp3" => Server3,
+        _ => throw new ArgumentException("Неизвестный MCP-сервер.", nameof(server))
+    };
+
+    private static StdioClientTransport CreateTransport(ServerState server)
+    {
+        var environment = new Dictionary<string, string?>();
+
+        foreach (var name in new[] { "PATH", "SystemRoot", "TEMP", "TMP", "DOTNET_ROOT", "ProgramFiles" })
+            environment[name] = Environment.GetEnvironmentVariable(name);
+
+        return new StdioClientTransport(new StdioClientTransportOptions
+        {
+            Name = server.AssemblyName,
+            Command = "dotnet",
+            Arguments =
+            [
+                Path.Combine(
+                server.Directory,
+                "bin",
+                "Debug",
+                "net10.0",
+                server.AssemblyName + ".dll")
+            ],
+            WorkingDirectory = server.Directory,
+            InheritEnvironmentVariables = false,
+            EnvironmentVariables = environment,
+            StandardErrorLines = _ => { }
+        });
+    }
+    public static async Task<string> GetToolsCatalogAsync(
+    CancellationToken cancellationToken)
+    {
+        var catalog = new List<object>();
+
+        foreach (var item in new[]
+        {
+        (Name: "mcp1", Server: Server1),
+        (Name: "mcp2", Server: Server2),
+        (Name: "mcp3", Server: Server3)
+    })
+        {
+            using var timeout =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+
+            await using var client = await McpClient.CreateAsync(
+                CreateTransport(item.Server),
+                cancellationToken: timeout.Token);
+
+            var tools = await client.ListToolsAsync(
+                cancellationToken: timeout.Token);
+
+            foreach (var tool in tools)
+            {
+                catalog.Add(new
+                {
+                    server = item.Name,
+                    tool = tool.Name,
+                    description = tool.Description ?? "Описание отсутствует",
+                    inputSchema = tool.JsonSchema.ToString()
+                });
+            }
+        }
+
+        return JsonSerializer.Serialize(catalog);
+    }
+    public static async Task<ToolResult> ExecuteToolAsync(
+    string serverName,
+    string toolName,
+    Dictionary<string, object?> arguments,
+    CancellationToken cancellationToken)
+    {
+        var server = GetServer(serverName);
+
+        using var timeout =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        timeout.CancelAfter(TimeSpan.FromMinutes(15));
+
+        await using var client = await McpClient.CreateAsync(
+            CreateTransport(server),
+            cancellationToken: timeout.Token);
+
+        var result = await client.CallToolAsync(
+            toolName,
+            arguments,
+            cancellationToken: timeout.Token);
+
+        var text = string.Join(
+            "\n",
+            result.Content
+                .OfType<TextContentBlock>()
+                .Select(x => x.Text));
+
+        return new ToolResult(
+            serverName,
+            toolName,
+            result.IsError == true,
+            text,
+            result.StructuredContent?.ToString());
+    }
     public static async Task HandleAsync(string command, CancellationToken cancellationToken)
     {
         var parts = command.Split((char[]?)null, 3, StringSplitOptions.RemoveEmptyEntries);
-        var isCall = parts.Length > 0 && parts[0].Equals("mcp-call", StringComparison.OrdinalIgnoreCase);
+        var prefix = parts.Length > 0 && parts[0].StartsWith("mcp3-", StringComparison.OrdinalIgnoreCase)
+    ? "mcp3"
+    : parts.Length > 0 && parts[0].StartsWith("mcp2-", StringComparison.OrdinalIgnoreCase)
+        ? "mcp2"
+        : "mcp1";
+
+        var server = prefix == "mcp3" ? Server3 : prefix == "mcp2" ? Server2 : Server1;
+        var isCall = parts.Length > 0 && parts[0].Equals(prefix + "-call", StringComparison.OrdinalIgnoreCase);
         if (isCall && parts.Length < 2)
         {
-            Console.WriteLine("Использование: mcp-call <tool-name> [JSON-объект аргументов]");
+            Console.WriteLine($"Использование: {prefix}-call <tool-name> [JSON-объект аргументов]");
             return;
         }
-        if (!isCall && !command.Equals("mcp-tools", StringComparison.OrdinalIgnoreCase))
+        if (!isCall && !command.Equals(prefix + "-tools", StringComparison.OrdinalIgnoreCase))
         {
-            Console.WriteLine("Неизвестная MCP-команда. Доступны: mcp-tools; mcp-call <tool-name>.");
+           Console.WriteLine("Неизвестная MCP-команда. Доступны: mcp1-tools; mcp1-call <tool-name>; mcp2-tools; mcp2-call <tool-name>; mcp3-tools; mcp3-call <tool-name>.");
             return;
         }
         try
         {
-            if (isCall && parts[1] == "get-model-elements") lastElements = null;
+            if (isCall && parts[1] == "get-model-elements") server.LastElements = null;
             if (isCall && (parts[1] == "get-model-elements" || parts[1] == "get-model-elements-parameters"))
-                lastParametersFile = null;
+                server.LastParametersFile = null;
             var arguments = new Dictionary<string, object?>();
             if (isCall && parts.Length == 3)
             {
@@ -49,9 +181,9 @@ internal static class McpCommands
             }
             if (isCall && parts[1] == "get-model-elements-parameters" && parts.Length == 2)
             {
-                if (lastElements is not { } previous)
+                if (server.LastElements is not { } previous)
                 {
-                    Console.WriteLine("Сначала выполните mcp-call get-model-elements в этом сеансе BimSAgent.");
+                    Console.WriteLine($"Сначала выполните {prefix}-call get-model-elements в этом сеансе BimSAgent.");
                     return;
                 }
                 if (previous.ElementIds.Length == 0)
@@ -64,25 +196,25 @@ internal static class McpCommands
             }
             if (isCall && parts[1] == "create-model-elements-report" && parts.Length == 2)
             {
-                if (lastParametersFile == null)
+                if (server.LastParametersFile == null)
                 {
-                    Console.WriteLine("Сначала выполните mcp-call get-model-elements-parameters в этом сеансе BimSAgent.");
+                    Console.WriteLine($"Сначала выполните {prefix}-call get-model-elements-parameters в этом сеансе BimSAgent.");
                     return;
                 }
-                arguments["filePath"] = lastParametersFile;
+                arguments["filePath"] = server.LastParametersFile;
             }
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(isCall && (parts[1] == "get-model-elements-parameters" || parts[1] == "get-model") ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(30));
+           timeout.CancelAfter(isCall && (prefix == "mcp3" || parts[1] == "get-model-elements-parameters" || parts[1] == "get-model" || (prefix == "mcp2" && (parts[1] == "get-documentation-elements" || parts[1] == "get-documentation"))) ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(30));
             // Do not inherit credentials, attach a logging provider or echo server stderr.
             var environment = new Dictionary<string, string?>();
             foreach (var name in new[] { "PATH", "SystemRoot", "TEMP", "TMP", "DOTNET_ROOT", "ProgramFiles" })
                 environment[name] = Environment.GetEnvironmentVariable(name);
             var transport = new StdioClientTransport(new StdioClientTransportOptions
             {
-                Name = "BIM-S_MCP-Server",
+                Name = server.AssemblyName,
                 Command = "dotnet",
-                Arguments = [Path.Combine(ServerDirectory, "bin", "Debug", "net10.0", "BIM-S_MCP-Server.dll")],
-                WorkingDirectory = ServerDirectory,
+                Arguments = [Path.Combine(server.Directory, "bin", "Debug", "net10.0", server.AssemblyName + ".dll")],
+                WorkingDirectory = server.Directory,
                 InheritEnvironmentVariables = false,
                 EnvironmentVariables = environment,
                 StandardErrorLines = _ => { }
@@ -96,12 +228,12 @@ internal static class McpCommands
                     result.StructuredContent is { ValueKind: JsonValueKind.Object } exported &&
                     exported.TryGetProperty("filePath", out var savedPath) && savedPath.ValueKind == JsonValueKind.String &&
                     !string.IsNullOrWhiteSpace(savedPath.GetString()))
-                    lastParametersFile = savedPath.GetString();
+                    server.LastParametersFile = savedPath.GetString();
                 if (result.IsError == true)
                     Console.WriteLine("MCP: инструмент вернул ошибку.");
                 if (result.IsError != true && parts[1] == "get-model-elements")
                 {
-                    RememberElements(result.StructuredContent);
+                    RememberElements(server, result.StructuredContent);
                     if (result.StructuredContent is { } data && TryPrintElements(data.ToString())) return;
                     foreach (var block in result.Content.OfType<TextContentBlock>())
                         if (TryPrintElements(block.Text)) return;
@@ -136,7 +268,7 @@ internal static class McpCommands
         }
     }
 
-    private static void RememberElements(JsonElement? content)
+    private static void RememberElements(ServerState server, JsonElement? content)
     {
         if (content is not { ValueKind: JsonValueKind.Object } root ||
             !root.TryGetProperty("documentSession", out var session) || session.ValueKind != JsonValueKind.String ||
@@ -151,7 +283,7 @@ internal static class McpCommands
                 !id.TryGetInt64(out var value) || value <= 0) return;
             ids.Add(value);
         }
-        lastElements = (ids.Distinct().ToArray(), session.GetString()!);
+        server.LastElements = (ids.Distinct().ToArray(), session.GetString()!);
     }
 
     private static bool TryPrintElements(string json)

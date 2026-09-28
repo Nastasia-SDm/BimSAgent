@@ -187,7 +187,160 @@ public sealed class BimSAgent : IDisposable
 
     public Task<string> AskAsync(string prompt, int maxOutputTokens, double temperature, CancellationToken cancellationToken = default) =>
         SendAsync(prompt, Instructions, cancellationToken, maxOutputTokens, temperature);
+    private sealed record McpPlanStep(
+string Server,
+string Tool,
+Dictionary<string, JsonElement> Arguments);
 
+    private sealed record McpPlan(
+        bool UseMcp,
+        List<McpPlanStep> Steps,
+        string Reason);
+    private static readonly JsonElement McpPlanSchema =
+        JsonSerializer.Deserialize<JsonElement>("""
+    {
+      "type":"object",
+      "additionalProperties":false,
+      "required":["useMcp","steps","reason"],
+      "properties":{
+        "useMcp":{"type":"boolean"},
+        "steps":{
+          "type":"array",
+          "items":{
+            "type":"object",
+            "additionalProperties":false,
+            "required":["server","tool","arguments"],
+            "properties":{
+              "server":{"type":"string","enum":["mcp1","mcp2","mcp3"]},
+              "tool":{"type":"string"},
+              "arguments":{"type":"object"}
+            }
+          }
+        },
+        "reason":{"type":"string"}
+      }
+    }
+    """);
+    private async Task<McpPlan> CreateMcpPlanAsync(
+    string userQuestion,
+    CancellationToken cancellationToken)
+    {
+        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+        if (string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException(
+                "Задайте переменную окружения OPENAI_API_KEY.");
+
+        var toolsCatalog =
+            await McpCommands.GetToolsCatalogAsync(cancellationToken);
+
+        var payload = new Dictionary<string, object>
+        {
+            ["model"] = Model,
+            ["instructions"] = """
+Ты MCP-планировщик.
+
+Определи, нужен ли MCP для ответа пользователю.
+
+Если MCP нужен:
+- используй только tools из переданного каталога;
+- построй полный план заранее;
+- укажи server, tool и arguments каждого шага;
+- шаги расположи в правильном порядке;
+- не придумывай tools или arguments;
+- не добавляй LLM-вызовы между MCP-шагами.
+
+Если MCP не нужен:
+useMcp=false и steps=[].
+""",
+            ["input"] = new[]
+            {
+            new Message(
+                "user",
+                $"Вопрос пользователя:\n{userQuestion}\n\n" +
+                $"Каталог MCP:\n{toolsCatalog}")
+        },
+            ["store"] = false,
+            ["text"] = new
+            {
+                format = new
+                {
+                    type = "json_schema",
+                    name = "mcp_plan",
+                    strict = true,
+                    schema = McpPlanSchema
+                }
+            }
+        };
+
+        var result =
+            await RequestCompletionAsync(payload, apiKey, cancellationToken);
+
+        return JsonSerializer.Deserialize<McpPlan>(
+            result.Answer,
+            new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            })
+            ?? throw new InvalidOperationException(
+                "LLM не вернула MCP-план.");
+    }
+    private async Task<List<McpCommands.ToolResult>> ExecuteMcpPlanAsync(
+    McpPlan plan,
+    CancellationToken cancellationToken)
+    {
+        var results = new List<McpCommands.ToolResult>();
+
+        if (!plan.UseMcp)
+            return results;
+
+        foreach (var step in plan.Steps)
+        {
+            var arguments = step.Arguments.ToDictionary(
+                x => x.Key,
+                x => (object?)x.Value.Clone());
+
+            var result = await McpCommands.ExecuteToolAsync(
+                step.Server,
+                step.Tool,
+                arguments,
+                cancellationToken);
+
+            results.Add(result);
+
+            if (result.IsError)
+                break;
+        }
+
+        return results;
+    }
+    public async Task<string> AskWithMcpAsync(
+    string prompt,
+    int maxOutputTokens,
+    double temperature,
+    CancellationToken cancellationToken = default)
+    {
+        var plan = await CreateMcpPlanAsync(prompt, cancellationToken);
+
+        if (!plan.UseMcp)
+            return await AskAsync(
+                prompt,
+                maxOutputTokens,
+                temperature,
+                cancellationToken);
+
+        var results = await ExecuteMcpPlanAsync(
+            plan,
+            cancellationToken);
+
+        var mcpData = JsonSerializer.Serialize(results);
+
+        return await SendAsync(
+            prompt + "\n\nMCP результаты:\n" + mcpData,
+            Instructions,
+            cancellationToken,
+            maxOutputTokens,
+            temperature);
+    }
     public Task<string> GeneratePromptAsync(string task, int maxOutputTokens, double temperature, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(task);

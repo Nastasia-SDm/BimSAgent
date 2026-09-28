@@ -21,6 +21,7 @@ namespace BimS.Revit2024
         private string documentSession;
         private bool includeDocumentSession;
         private long[] elementIds;
+        private ViewGraphRequest viewGraphRequest;
         private readonly List<KeyValuePair<Document, SessionIdentity>> documentSessions =
             new List<KeyValuePair<Document, SessionIdentity>>();
         private sealed class SessionIdentity { public readonly string Id = Guid.NewGuid().ToString("N"); }
@@ -168,11 +169,22 @@ namespace BimS.Revit2024
             string requestedSession = null;
             bool requestedEnvelope = false;
             long[] requestedIds = null;
+            ViewGraphRequest requestedGraph = null;
             BuiltInCategory[] requestedCategories = null;
             var requestedProperties = new Dictionary<BuiltInCategory, PropertyRequest[]>();
             try
             {
                 var input = Serializer().DeserializeObject(json) as Dictionary<string, object>;
+                if (input != null && input.TryGetValue("collection", out var graphCollection) && Equals(graphCollection, "viewGraph"))
+                {
+                    requestedGraph = ViewGraphRequest.Parse(input);
+                    requested = requestedGraph.Fields;
+                    requestedScope = requestedGraph.Scope;
+                    requestedCollection = "viewGraph";
+                    requestedSession = requestedGraph.DocumentSession;
+                }
+                else
+                {
                 if (input == null ||input.Keys.Any(k => k != "collection" && k != "fields" && k != "scope" && k != "categories" && k != "propertyRequests" && k != "documentSession" && k != "includeDocumentSession" && k != "elementIds") || !input.ContainsKey("collection") ||
                     !(Equals(input["collection"], "elements") || Equals(input["collection"], "document") || Equals(input["collection"], "elementParameters")) || !input.ContainsKey("fields") ||
                     !(input["fields"] is object[] values) || values.Length == 0 ||
@@ -222,6 +234,7 @@ namespace BimS.Revit2024
                 if (requestedCollection == "elementParameters" ? requested.Any(f => !new[] { "ElementId", "Category", "FamilyName", "TypeName", "TypeId", "InstanceParameters", "TypeParameters" }.Contains(f)) : requestedCollection == "document" ? requested.Any(f => f != "SessionId") : requested.Any(f => f != "ElementId" && f != "Category" && f != "Name" && f != "FamilyName" && f != "TypeName" && f != "SystemProperties"))
                     return Error("Поддерживаются только ElementId, Category, Name, FamilyName, TypeName, SystemProperties.");
                 if (input.TryGetValue("propertyRequests", out var properties)) requestedProperties = ParseProperties(properties);
+                }
             }
             catch (Exception e) when (e is ArgumentException || e is InvalidOperationException)
             { NamedPipeBridge.Diagnostic("request.parse.failed", e); return Error("Некорректный JSON-запрос."); }
@@ -243,6 +256,7 @@ namespace BimS.Revit2024
                         documentSession = requestedSession;
                         includeDocumentSession = requestedEnvelope;
                         elementIds = requestedIds;
+                        viewGraphRequest = requestedGraph;
                         categories = requestedCategories;
                         propertyRequests = requestedProperties;
                         try
@@ -283,6 +297,11 @@ namespace BimS.Revit2024
                     }
                     if (collection == "document")
                     { pending.TrySetResult(Serializer().Serialize(new { SessionId = sessionId })); return; }
+                    if (collection == "viewGraph")
+                    {
+                        var graph = ViewGraphReader.Read(document, sessionId, viewGraphRequest, CheckReadCancellation);
+                        pending.TrySetResult(Serializer().Serialize(graph)); return;
+                    }
                     if (collection == "elementParameters")
                     {
                         var exported = ReadElementParameters(document);

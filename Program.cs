@@ -32,8 +32,8 @@ Console.WriteLine(agent.ContextStatus);
 Console.WriteLine("memory optimize; memory <id> move from <source> to <target>; memory <id> delete from <source>");
 Console.WriteLine("profile create <name>; profile use <name>; profile show; profile list; profile skip");
 Console.WriteLine("task create <name>; task open <id>; task pause");
-Console.WriteLine("mcp-tools — список инструментов локального MCP-сервера");
-Console.WriteLine("mcp-call <tool-name> — прямой вызов инструмента MCP без аргументов");
+Console.WriteLine("mcp1-tools / mcp2-tools / mcp3-tools — список инструментов MCP-сервера №1 / №2 / №3");
+Console.WriteLine("mcp1-call / mcp2-call / mcp3-call <tool-name> [JSON-аргументы] — вызов инструмента MCP-сервера №1 / №2 / №3");
 
 while (!shutdown.IsCancellationRequested)
 {
@@ -132,7 +132,7 @@ while (!shutdown.IsCancellationRequested)
             if (!await UpdateFactsIfNeededAsync(agent, input, shutdown.Token)) break;
             var options = await ReadOptionsAsync(shutdown.Token);
             if (options is null) break;
-            Console.WriteLine($"\nАгент: {await agent.AskAsync(input, options.Value.Tokens, options.Value.Temperature, shutdown.Token)}");
+           Console.WriteLine($"\nАгент: {await agent.AskWithMcpAsync(input, options.Value.Tokens, options.Value.Temperature, shutdown.Token)}");
         }
         if (!await ReportResponseAsync(agent, shutdown.Token)) break;
     }
@@ -302,7 +302,7 @@ static async Task<string?> ReadUserInputAsync(CancellationToken cancellationToke
     while (true)
     {
         var input = await Console.In.ReadLineAsync(cancellationToken);
-        if (input is null || !input.TrimStart().StartsWith("mcp-", StringComparison.OrdinalIgnoreCase))
+       if (input is null || !(input.TrimStart().StartsWith("mcp1-", StringComparison.OrdinalIgnoreCase) || input.TrimStart().StartsWith("mcp2-", StringComparison.OrdinalIgnoreCase) || input.TrimStart().StartsWith("mcp3-", StringComparison.OrdinalIgnoreCase) || input.TrimStart().StartsWith("mcp-", StringComparison.OrdinalIgnoreCase)))
             return input;
         await McpCommands.HandleAsync(input.Trim(), cancellationToken);
         Console.Write("Продолжите ввод: ");
