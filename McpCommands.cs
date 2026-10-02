@@ -90,12 +90,19 @@ internal static class McpCommands
 
             foreach (var tool in tools)
             {
+                if (item.Name == "mcp1" &&
+                    tool.Name is "stop-model-watch"
+                        or "get-model-elements"
+                        or "get-model-elements-parameters"
+                        or "create-model-elements-report")
+                    continue;
+
                 catalog.Add(new
                 {
                     server = item.Name,
                     tool = tool.Name,
                     description = tool.Description ?? "Описание отсутствует",
-                    inputSchema = tool.JsonSchema.ToString()
+                    inputSchema = tool.JsonSchema
                 });
             }
         }
@@ -164,22 +171,53 @@ internal static class McpCommands
             if (isCall && (parts[1] == "get-model-elements" || parts[1] == "get-model-elements-parameters"))
                 server.LastParametersFile = null;
             var arguments = new Dictionary<string, object?>();
+
             if (isCall && parts.Length == 3)
             {
-                try
+                if (prefix == "mcp3" &&
+                    parts[1].Equals("compare-model-versions", StringComparison.OrdinalIgnoreCase) &&
+                    !parts[2].TrimStart().StartsWith("{", StringComparison.Ordinal))
                 {
-                    using var json = JsonDocument.Parse(parts[2]);
-                    if (json.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException();
-                    foreach (var property in json.RootElement.EnumerateObject())
-                        if (!arguments.TryAdd(property.Name, property.Value.Clone())) throw new JsonException();
+                    var versions = parts[2].Split(
+                        (char[]?)null,
+                        StringSplitOptions.RemoveEmptyEntries);
+
+                    if (versions.Length != 2)
+                    {
+                        Console.WriteLine(
+                            "Использование: mcp3-call compare-model-versions V003 V007 или previous latest; также поддержан JSON с version1, version2, mode.");
+                        return;
+                    }
+
+                    arguments["version1"] = versions[0];
+                    arguments["version2"] = versions[1];
                 }
-                catch (JsonException)
+                else
                 {
-                    Console.WriteLine("MCP: аргументы должны быть JSON-объектом без повторяющихся свойств.");
-                    return;
+                    try
+                    {
+                        using var json = JsonDocument.Parse(parts[2]);
+
+                        if (json.RootElement.ValueKind != JsonValueKind.Object)
+                            throw new JsonException();
+
+                        foreach (var property in json.RootElement.EnumerateObject())
+                            if (!arguments.TryAdd(
+                                property.Name,
+                                property.Value.Clone()))
+                                throw new JsonException();
+                    }
+                    catch (JsonException)
+                    {
+                        Console.WriteLine(
+                            "MCP: аргументы должны быть JSON-объектом без повторяющихся свойств.");
+                        return;
+                    }
                 }
             }
-            if (isCall && parts[1] == "get-model-elements-parameters" && parts.Length == 2)
+            if (isCall &&
+     parts[1] == "get-model-elements-parameters" &&
+     parts.Length == 2)
             {
                 if (server.LastElements is not { } previous)
                 {
@@ -237,6 +275,20 @@ internal static class McpCommands
                     if (result.StructuredContent is { } data && TryPrintElements(data.ToString())) return;
                     foreach (var block in result.Content.OfType<TextContentBlock>())
                         if (TryPrintElements(block.Text)) return;
+                }
+                if (result.IsError != true &&
+    parts[1] == "get-model" &&
+    result.StructuredContent is { } modelData &&
+    TryPrintModelSnapshot(modelData.ToString()))
+                    return;
+                if (result.IsError != true &&
+prefix == "mcp3" &&
+parts[1] == "compare-model-versions")
+                {
+                    foreach (var content in result.Content.OfType<TextContentBlock>())
+                        Console.WriteLine(SafeText(content.Text));
+
+                    return;
                 }
                 foreach (var content in result.Content)
                     Console.WriteLine(SafeText(content is TextContentBlock text
@@ -339,10 +391,87 @@ internal static class McpCommands
                 Console.WriteLine();
             }
             return true;
+            
         }
         catch (JsonException) { return false; }
     }
+    private static bool TryPrintModelSnapshot(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
 
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("snapshot", out var snapshot) ||
+                snapshot.ValueKind != JsonValueKind.Object ||
+                !snapshot.TryGetProperty("elements", out var elements) ||
+                elements.ValueKind != JsonValueKind.Array)
+                return false;
+
+            foreach (var element in elements.EnumerateArray())
+            {
+                string Value(string name)
+                {
+                    if (!element.TryGetProperty(name, out var value) ||
+                        value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                        return "не определено";
+
+                    var text = SafeText(value.ToString());
+                    return string.IsNullOrWhiteSpace(text) ? "не определено" : text;
+                }
+
+                Console.WriteLine($"Категория: {Value("category")}");
+                Console.WriteLine($"🆔 Element-ID: {Value("elementId")}");
+                Console.WriteLine($"🔽 Имя семейства: {Value("familyName")}");
+                Console.WriteLine($"⏬ Имя типа: {Value("typeName")}");
+
+                PrintParameters("instanceParameters");
+                PrintParameters("typeParameters");
+
+                Console.WriteLine();
+
+                void PrintParameters(string propertyName)
+                {
+                    if (!element.TryGetProperty(propertyName, out var parameters) ||
+                        parameters.ValueKind != JsonValueKind.Array)
+                        return;
+
+                    foreach (var parameter in parameters.EnumerateArray())
+                    {
+                        if (parameter.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        var name = parameter.TryGetProperty("name", out var n)
+                            ? SafeText(n.ToString())
+                            : "Параметр";
+
+                        string value = "не определено";
+
+                        foreach (var field in new[] { "displayValue", "convertedValue", "rawValue" })
+                        {
+                            if (parameter.TryGetProperty(field, out var v) &&
+                                v.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined &&
+                                !string.IsNullOrWhiteSpace(v.ToString()))
+                            {
+                                value = SafeText(v.ToString());
+                                break;
+                            }
+                        }
+
+                        if (value != "не определено")
+                            Console.WriteLine($"⬪ {name}: {value}");
+                    }
+                }
+            }
+
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
     private static string SafeText(string text)
     {
         text = Regex.Replace(text, @"(?i)\b(?:sk-[\w-]+|Bearer\s+\S+|(?:api[_ -]?key|token|password|secret|пароль|токен)\s*[:=]\s*\S+)", "[скрыто]");

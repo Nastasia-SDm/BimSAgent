@@ -1,5 +1,7 @@
 bin/
 obj/
+.work/
+tests/artifacts/
 .env
 *.user
 profiles/*.json
@@ -23,3 +25,4 @@ summary-*.json
 summary-*.json.tmp
 memory-pending.json
 memory-pending.json.tmp
+rag-data/

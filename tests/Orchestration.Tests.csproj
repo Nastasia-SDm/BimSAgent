@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Rag\**\*.cs" />
+    <!-- Same orchestration implementation, deterministic MCP/HTTP test doubles. -->
+    <Compile Include="../BimSAgent.cs" Link="BimSAgent.cs" />
+    <Compile Include="../McpFinalContext.cs" Link="McpFinalContext.cs" />
+    <None Include="../invariants.json" Link="invariants.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

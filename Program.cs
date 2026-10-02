@@ -1,5 +1,6 @@
 using System.Text;
 using BimSAgentApp;
+using BimSAgentApp.Rag;
 
 Console.InputEncoding = Encoding.UTF8;
 Console.OutputEncoding = Encoding.UTF8;
@@ -10,6 +11,13 @@ Console.CancelKeyPress += (_, e) =>
     e.Cancel = true;
     shutdown.Cancel();
 };
+
+// Experimental commands must not construct the stateful dialogue agent.
+if (args.Length > 0 && args[0].Equals("rag", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = await RagCommands.RunAsync(args, shutdown.Token);
+    return;
+}
 
 BimSAgent loadedAgent;
 try
@@ -29,6 +37,7 @@ Console.WriteLine($"Модель: {BimSAgent.Model}. Тест лимита ко�
 Console.WriteLine("Создать технический prompt по задаче: generate-prompt.");
 Console.WriteLine("strategy sliding-window|sticky-facts|branching; checkpoint; branch create <name>; branch switch <name>");
 Console.WriteLine(agent.ContextStatus);
+Console.WriteLine(RagCommands.Help);
 Console.WriteLine("memory optimize; memory <id> move from <source> to <target>; memory <id> delete from <source>");
 Console.WriteLine("profile create <name>; profile use <name>; profile show; profile list; profile skip");
 Console.WriteLine("task create <name>; task open <id>; task pause");
@@ -55,6 +64,12 @@ while (!shutdown.IsCancellationRequested)
 
     try
     {
+        if (input.TrimStart().Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries)[0].Equals("rag", StringComparison.OrdinalIgnoreCase))
+        {
+            try { await RagCommands.RunAsync(RagCommands.Split(input), shutdown.Token); }
+            catch (ArgumentException e) { Console.Error.WriteLine(e.Message); }
+            continue;
+        }
         var profileParts = input.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (profileParts[0].Equals("task", StringComparison.OrdinalIgnoreCase))
         {
@@ -129,10 +144,18 @@ while (!shutdown.IsCancellationRequested)
         }
         else
         {
-            if (!await UpdateFactsIfNeededAsync(agent, input, shutdown.Token)) break;
             var options = await ReadOptionsAsync(shutdown.Token);
             if (options is null) break;
-           Console.WriteLine($"\nАгент: {await agent.AskWithMcpAsync(input, options.Value.Tokens, options.Value.Temperature, shutdown.Token)}");
+            var answer = await agent.AskWithMcpAsync(
+                input, options.Value.Tokens, options.Value.Temperature, shutdown.Token,
+                prepareNonMcp: async token =>
+                {
+                    // Facts remain part of the ordinary route, after routing is known.
+                    if (!await UpdateFactsIfNeededAsync(agent, input, token))
+                        shutdown.Cancel();
+                    shutdown.Token.ThrowIfCancellationRequested();
+                });
+            Console.WriteLine($"\nАгент: {answer}");
         }
         if (!await ReportResponseAsync(agent, shutdown.Token)) break;
     }
@@ -271,6 +294,7 @@ static async Task<bool> ReportResponseAsync(BimSAgent agent, CancellationToken c
             Console.WriteLine($"Токены запроса: {Format(tokens.TotalInput)}");
             Console.WriteLine($"Токены ответа: {Format(tokens.Output)}");
         }
+        if (agent.LastResponseUsedMcp) return true;
         var memoryReport = await agent.UpdateMemoryAsync(cancellationToken);
         // Hide routine summaries, but keep explicit per-entry failures visible.
         foreach (var error in memoryReport.Split(Environment.NewLine).Skip(1))
