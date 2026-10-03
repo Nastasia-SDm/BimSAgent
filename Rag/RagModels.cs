@@ -9,7 +9,7 @@ public static class RagDefaults
     public const int Dimensions = 1536;
     public const string AnswerModel = "gpt-5.4-mini";
     public const string DataDirectory = @"D:\BIM-S_TestArtifacts\rag-data";
-    public const string Unknown = "Не знаю: в найденных фрагментах недостаточно информации.";
+    public const string Unknown = "Не знаю. Для корректного ответа нужны дополнительные данные.";
     public static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
     public static void ValidateStrategy(string strategy)
     {
