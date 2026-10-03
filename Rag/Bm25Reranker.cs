@@ -20,6 +20,9 @@ public sealed class Bm25Reranker : IReranker
     public IReadOnlyList<RetrievalHit> Rerank(string question, IReadOnlyList<RetrievalHit> candidates)
     {
         if (candidates.Count == 0) return [];
+        if (candidates.All(h => h.FusionScore > 0))
+            return candidates.Select(h => h with { RerankScore = h.FusionScore, RerankerMode = "lexical_fallback" })
+                .OrderByDescending(h => h.RerankScore).ThenBy(h => h.Chunk.ChunkId, StringComparer.Ordinal).ToArray();
         var terms = Tokens(question).Distinct().ToArray();
         var docs = candidates.Select(h => Tokens(h.Chunk.Text)).ToArray();
         var averageLength = Math.Max(1, docs.Average(d => d.Length));

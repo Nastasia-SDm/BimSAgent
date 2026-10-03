@@ -25,9 +25,10 @@ public sealed class SemanticReranker(HttpClient http, Uri endpoint, string model
                 var batch = passages.Skip(offset).Take(32).ToArray();
                 using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
                 if (!string.IsNullOrWhiteSpace(apiKey)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-                request.Content = JsonContent.Create(new { query = question, texts = batch.Select(p => p.Text), model, truncate = false });
+                request.Content = new StringContent(JsonSerializer.Serialize(new { query = question, texts = batch.Select(p => p.Text), model, truncate = false }),
+                    System.Text.Encoding.UTF8, "application/json");
                 using var response = await http.SendAsync(request, cancellationToken);
-                if (!response.IsSuccessStatusCode) throw new HttpRequestException("Reranker HTTP " + (int)response.StatusCode);
+                if (!response.IsSuccessStatusCode) throw new HttpRequestException("Reranker HTTP " + (int)response.StatusCode, null, response.StatusCode);
                 using var result = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
                 var values = result.RootElement.EnumerateArray().ToArray();
                 var seen = new HashSet<int>();
@@ -49,7 +50,8 @@ public sealed class SemanticReranker(HttpClient http, Uri endpoint, string model
         catch (Exception e) when (e is HttpRequestException or JsonException or InvalidDataException
             || e is OperationCanceledException && !cancellationToken.IsCancellationRequested)
         {
-            return new Bm25Reranker().Rerank(question, candidates).Select(h => h with { RerankerMode = "lexical_fallback:reranker_unavailable" }).ToArray();
+            var reason = e is HttpRequestException error && error.StatusCode is { } status ? "http_" + (int)status : e.GetType().Name;
+            return new Bm25Reranker().Rerank(question, candidates).Select(h => h with { RerankerMode = "lexical_fallback:reranker_unavailable", SelectionReason = "reranker_" + reason }).ToArray();
         }
     }
 }

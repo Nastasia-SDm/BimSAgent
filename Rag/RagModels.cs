@@ -54,7 +54,7 @@ public sealed record FamilyCard(string FamilyId, string CanonicalName, string[] 
 public sealed record IndexManifest(string Extraction, string CardBuilding, string Chunking, string EmbeddingTemplate,
     string AssetProcessing, string ConfigurationHash)
 {
-    public static IndexManifest Current => new("3", "3", "3", "3", "unconfigured", RagDefaults.Hash("parent=2000;child=650;overlap=100"));
+    public static IndexManifest Current => new("3", "4", "4", "3", "unconfigured", RagDefaults.Hash("parent=2000;child=650;overlap=100"));
 }
 public sealed record ExtractedDocument(string Source, string Title, string File, string ContentHash,
     IReadOnlyList<DocumentBlock> Blocks)
@@ -76,7 +76,13 @@ public sealed record RagChunk(string Source, string Title, string File, string S
     public string[] Warnings { get; init; } = [];
     public string[] AssetIds { get; init; } = [];
     public EvidenceSpan[] Spans { get; init; } = [];
+    public string FamilyPurpose { get; init; } = "";
+    public string[] PurposeBlockIds { get; init; } = [];
+    public TableContext[] Tables { get; init; } = [];
+    public DocumentBlock[] InheritedContext { get; init; } = [];
+    public string[] FamilyWarnings { get; init; } = [];
 }
+public sealed record TableContext(string TableId, string[] Headers, string HeaderBlockId, bool InferredFromFirstRow);
 public sealed record EvidenceSpan(string BlockId, string? OwnerFamilyId, int Start, int End, int SourceStart, int SourceEnd);
 
 public sealed record RagIndex(int SchemaVersion, string BuildId, string Source, string ContentHash,
@@ -106,7 +112,7 @@ public sealed record RetrievalHit(RagChunk Chunk, double SimilarityScore)
     public string? MatchedPassage { get; init; }
 }
 public sealed record RetrievalSelection(IReadOnlyList<RetrievalHit> Candidates, int ScannedCount);
-public sealed record AnswerOptions(double Temperature = 0, int MaxOutputTokens = 900);
+public sealed record AnswerOptions(double Temperature = 0, int MaxOutputTokens = 2000);
 public sealed record RagQuestionContext(string Question, IReadOnlyList<RetrievalHit> Context)
 {
     public int ScannedCount { get; init; }

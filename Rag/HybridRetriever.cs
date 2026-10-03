@@ -4,13 +4,13 @@ namespace BimSAgentApp.Rag;
 
 public static class SearchLanguage
 {
-    private static readonly HashSet<string> Stop = new("как какой какая какие какое для про при это что чего где когда нужно можно надо есть или чем почему который которого чтобы этого этой если семейство семейства revit the and with what how подходят используют моделирования".Split(' '));
+    private static readonly HashSet<string> Stop = new("и в во на к ко с со у о об от до по из за как какой какая какие какое для про при это что чего где когда нужно нужен нужна нужны требуется можно надо есть или чем почему который которого чтобы этого этой если семейство семейства revit the and with what how подходят используют моделирования".Split(' '));
     public static string[] Tokens(string text) => Regex.Matches(text.ToLowerInvariant().Replace('ё', 'е'), @"[\p{L}\p{N}_№.+\-]+")
         .Select(m => m.Value.Trim('.', '-')).Where(w => w.Length > 0 && !Stop.Contains(w)).Select(Stem).ToArray();
     private static string Stem(string word)
     {
         if (word.Contains('_') || word.Any(char.IsDigit) || word.Length < 5 || word is "нельзя") return word;
-        return Regex.Replace(word, @"(?:иями|ями|ами|ого|ему|ому|ыми|ими|ая|яя|ое|ее|ые|ие|ой|ый|ий|ей|ов|ев|ам|ям|ах|ях|ом|ем|ы|и|а|я|у|ю|е)$", "");
+        return Regex.Replace(word, @"(?:иями|ями|ами|ого|ему|ому|ыми|ими|ая|яя|ое|ее|ые|ие|ую|юю|ою|ею|ым|им|ых|их|ой|ый|ий|ей|ов|ев|ам|ям|ах|ях|ом|ем|ы|и|а|я|у|ю|е)$", "");
     }
 }
 
@@ -49,10 +49,13 @@ public sealed class HybridRetriever(IReranker? reranker = null) : IRetriever
             .Select((h, i) => (h.Chunk.ChunkId, Rank: i + 1)).ToDictionary(x => x.ChunkId, x => x.Rank);
         var lexicalRanks = all.Where(h => h.LexicalScore > 0).OrderByDescending(h => h.LexicalScore)
             .ThenBy(h => h.Chunk.ChunkId, StringComparer.Ordinal).Select((h, i) => (h.Chunk.ChunkId, Rank: i + 1)).ToDictionary(x => x.ChunkId, x => x.Rank);
+        // Dense card recall is independent of the number of passages/images in any family.
+        var cardIds = all.Where(h => h.Chunk.Kind == "family_card").OrderByDescending(h => h.SimilarityScore)
+            .GroupBy(h => h.Chunk.OwnerFamilyId).Select(g => g.First()).Take(20).Select(h => h.Chunk.ChunkId).ToHashSet();
         return all.Select(h => h with
         { DenseRank = dense[h.Chunk.ChunkId], LexicalRank = lexicalRanks.GetValueOrDefault(h.Chunk.ChunkId),
             FusionScore = 1.0 / (60 + dense[h.Chunk.ChunkId]) + (lexicalRanks.TryGetValue(h.Chunk.ChunkId, out var r) ? 1.0 / (60 + r) : 0) })
-            .Where(h => h.DenseRank <= Math.Max(60, limit ?? 0) || h.LexicalRank is > 0 and <= 40 || h.ExactFamilyMatch)
+            .Where(h => h.DenseRank <= Math.Max(60, limit ?? 0) || h.LexicalRank is > 0 and <= 40 || h.ExactFamilyMatch || cardIds.Contains(h.Chunk.ChunkId))
             .OrderByDescending(h => h.FusionScore).ThenBy(h => h.Chunk.ChunkId, StringComparer.Ordinal).ToArray();
     }
 
@@ -63,7 +66,11 @@ public sealed class HybridRetriever(IReranker? reranker = null) : IRetriever
         var semantic = ranked.Any(h => h.RerankerMode.StartsWith("cross_encoder:", StringComparison.Ordinal));
         var scores = ranked.Where(h => semantic || h.LexicalScore == 0).Select(h => semantic ? h.RerankScore ?? 0 : h.SimilarityScore)
             .OrderDescending().Take(20).ToArray();
-        var cutoff = semantic ? 0.0 : 0.25;
+        var minimum = Environment.GetEnvironmentVariable("BIMS_RERANK_MIN_SCORE");
+        var semanticFloor = -2.5;
+        if (minimum != null && (!double.TryParse(minimum, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out semanticFloor)
+            || !double.IsFinite(semanticFloor))) throw new ArgumentException("BIMS_RERANK_MIN_SCORE должен быть конечным числом.");
+        var cutoff = semantic ? semanticFloor : 0.25;
         // Gap supplements an absolute floor; scores are not probabilities.
         var largestGap = semantic ? 2.0 : 0.15;
         for (var i = 1; i < scores.Length; i++)

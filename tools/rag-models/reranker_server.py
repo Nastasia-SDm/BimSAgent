@@ -11,12 +11,15 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 MODEL = "BAAI/bge-reranker-v2-m3"
-REVISION = os.environ.get("BIMS_RERANK_REVISION", "main")
+REVISION = os.environ.get("BIMS_RERANK_REVISION", "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e")
 torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
 tokenizer = AutoTokenizer.from_pretrained(MODEL, revision=REVISION, trust_remote_code=False)
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL, revision=REVISION, trust_remote_code=False, use_safetensors=True
 ).eval()
+QUANTIZED = os.environ.get("BIMS_RERANK_INT8", "1") == "1"
+if QUANTIZED:
+    model = torch.ao.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8, inplace=True)
 
 
 def rerank(query, texts):
@@ -56,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/health":
             return self.reply(404, {"error": "not_found"})
         self.reply(200, {"model": MODEL, "revision": getattr(model.config, "_commit_hash", REVISION),
-                         "device": "cpu", "max_pair_tokens": 512})
+                         "device": "cpu", "int8": QUANTIZED, "max_pair_tokens": 512})
 
     def do_POST(self):
         if self.path != "/rerank":

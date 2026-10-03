@@ -77,7 +77,8 @@ public abstract class ChunkerBase(RagTokenizer tokenizer, int size = 600, int ov
             // Persist exactly what was embedded, including inherited section/family context.
             var owners = covered.Select(b => b.OwnerFamilyId).Distinct().ToArray();
             var owner = owners.Length == 1 ? owners[0] : null;
-            var embeddingInput = EmbeddingInputBuilder.Build(value, section, names, document.Families.FirstOrDefault(f => f.FamilyId == owner));
+            var family = document.Families.FirstOrDefault(f => f.FamilyId == owner);
+            var embeddingInput = EmbeddingInputBuilder.Build(value, section, names, family);
             var parent = RagDefaults.Hash($"v2|{document.Source}|{document.ContentHash}|{Strategy}|{blocks[0].Ordinal}");
             var id = RagDefaults.Hash($"v2|{document.Source}|{document.ContentHash}|{Strategy}|{Size}|{Overlap}|{blocks[0].Ordinal}|{start}|{end}|{value}");
             yield return new(document.Source, document.Title, document.File, section, id, Strategy,
@@ -85,6 +86,9 @@ public abstract class ChunkerBase(RagTokenizer tokenizer, int size = 600, int ov
                 covered.Select(b => b.Ordinal).ToArray())
             {
                 ParentBlockId = parent, OwnerFamilyId = owner,
+                FamilyPurpose = family?.Purpose ?? "",
+                PurposeBlockIds = family == null ? [] : document.Blocks.Where(b => b.OwnerFamilyId == owner && b.Warnings.Length == 0
+                    && family.Purpose.Contains(b.Text, StringComparison.Ordinal)).Select(b => b.BlockId).ToArray(),
                 EmbeddingInputHash = RagDefaults.Hash(embeddingInput),
                 Warnings = covered.SelectMany(b => b.Warnings).Distinct().ToArray(),
                 AssetIds = covered.SelectMany(b => b.AssetIds).Distinct().ToArray(),

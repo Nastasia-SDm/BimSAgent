@@ -57,7 +57,7 @@ static class MultiQuestionTests
         check(ragInput.RootElement.GetProperty("questions").EnumerateArray().Select(q => q.GetProperty("question").GetString()).SequenceEqual(expected)
             && ragInput.RootElement.GetProperty("questions").EnumerateArray().All(q => q.GetProperty("fragments").GetArrayLength() == 1), "HTTP prompt groups questions with their fragments");
         check(noRagInput.RootElement.GetProperty("questions").EnumerateArray().All(q => q.GetProperty("fragments").GetArrayLength() == 0), "HTTP NO-RAG has no context");
-        check(handler.Payloads.All(p => p.GetProperty("instructions").GetString()!.Contains("⮕1.")), "HTTP prompt specifies numbered output");
+        check(handler.Payloads.All(p => p.GetProperty("instructions").GetString()!.Contains("1. <ответ>")), "HTTP prompt specifies numbered output");
     }
 
     sealed class Embeddings : IEmbeddingClient

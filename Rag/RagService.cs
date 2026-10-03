@@ -146,5 +146,5 @@ public sealed class RagService(IEmbeddingClient embeddings, IRagAnswerGenerator 
     }
 
     private async Task<RetrievalSelection> SelectContext(RagIndex index, float[] vector, string question, int? topK, CancellationToken cancellationToken)
-        => new ContextAssembler(tokenizer).Assemble(await retriever.RetrieveAsync(index, vector, question, topK, cancellationToken), ContextTokens);
+        => new ContextAssembler(tokenizer).Assemble(await retriever.RetrieveAsync(index, vector, question, topK, cancellationToken), ContextTokens, index);
 }

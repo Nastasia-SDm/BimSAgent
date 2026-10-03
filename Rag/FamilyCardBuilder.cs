@@ -8,7 +8,7 @@ public static class FamilyIdentity
     private const string Identifier = @"[\p{L}\p{N}][\p{L}\p{N}_№.+\-]*_[\p{L}\p{N}_№.+\-]+";
     public static string? HeadingName(string text)
     {
-        var match = Regex.Match(text.Trim(), "^(" + Identifier + @")(?:\s+\([^\r\n]*\))?$", RegexOptions.CultureInvariant);
+        var match = Regex.Match(text.Trim(), "^(" + Identifier + @"(?:[ ]+[\p{L}\p{N}_№.\-]+)*)(?:\s+\([^\r\n]*\))?$", RegexOptions.CultureInvariant);
         return match.Success ? match.Groups[1].Value : null;
     }
     public static bool Contains(string text, string name) => Regex.IsMatch(text,
@@ -22,9 +22,19 @@ public sealed class FamilyCardBuilder
     public ExtractedDocument Build(ExtractedDocument document)
     {
         var registry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var collisions = document.Blocks.Where(b => b.Kind == "heading" && FamilyIdentity.HeadingName(b.Text) != null)
+            .GroupBy(b => FamilyIdentity.HeadingName(b.Text)!, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Select(b => b.Text.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)
+            .Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string? Name(string text)
+        {
+            var name = FamilyIdentity.HeadingName(text);
+            // Parenthetical qualifiers can distinguish real variants; never merge colliding cards.
+            return name != null && collisions.Contains(name) ? text.Trim() : name;
+        }
         foreach (var block in document.Blocks)
         {
-            var name = block.Kind == "heading" ? FamilyIdentity.HeadingName(block.Text) : null;
+            var name = block.Kind == "heading" ? Name(block.Text) : null;
             if (name != null) registry.TryAdd(name, FamilyIdentity.Id(document.Source, name));
             if (block.Kind.StartsWith("table-row", StringComparison.Ordinal))
                 foreach (var candidate in block.FamilyNames)
@@ -38,7 +48,7 @@ public sealed class FamilyCardBuilder
         {
             if (block.Kind == "heading")
             {
-                var name = FamilyIdentity.HeadingName(block.Text);
+                var name = Name(block.Text);
                 if (name != null && registry.TryGetValue(name, out var id))
                 { owner = id; ownerName = name; ownerLevel = block.HeadingLevel ?? 0; }
                 else if ((block.HeadingLevel ?? 0) <= ownerLevel)

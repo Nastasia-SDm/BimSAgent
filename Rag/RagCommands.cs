@@ -6,7 +6,7 @@ namespace BimSAgentApp.Rag;
 
 public static class RagCommands
 {
-    public const string Help = "rag index \"<docx>\" | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--top-k <максимум>] [--json | --verbose]";
+   public const string Help = "rag index \"<docx>\" | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--baseline | --improved] [--top-k <максимум>] [--retrieval-only] [--json | --verbose]";
 
     public static string[] Split(string line)
     {
@@ -62,6 +62,8 @@ public static class RagCommands
             var json = false;
             var verbose = false;
             var retrievalOnly = false;
+            var baseline = false;
+            var improved = false;
             int? topK = null;
             for (var i = 3; i < args.Length; i++)
             {
@@ -78,12 +80,19 @@ public static class RagCommands
                     case "--json" when command != "index": json = true; break;
                     case "--verbose" when command == "ask": verbose = true; break;
                     case "--retrieval-only" when command == "ask": retrievalOnly = true; break;
+                    case "--baseline" when command == "ask": baseline = true; break;
+                    case "--improved" when command == "ask": improved = true; break;
                     default: throw new ArgumentException("Неизвестный или неполный параметр: " + args[i]);
                 }
             }
             if (noRag && strategySpecified) throw new ArgumentException("--no-rag не совмещается с --strategy.");
             if (noRag && retrievalOnly) throw new ArgumentException("--retrieval-only не совмещается с --no-rag.");
             if (verbose && json) throw new ArgumentException("--verbose не совмещается с --json.");
+            if (baseline && improved)
+                throw new ArgumentException("Выберите только один режим: --baseline или --improved.");
+
+            if (noRag && (baseline || improved))
+                throw new ArgumentException("--baseline/--improved не совмещаются с --no-rag.");
             using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
             var api = new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
             var embeddings = embeddingClient ?? api;
@@ -92,7 +101,9 @@ public static class RagCommands
             {
                 IDocumentAssetProcessor? processor = null;
                 var assetUrl = Environment.GetEnvironmentVariable("BIMS_ASSET_URL");
-                if (!string.IsNullOrWhiteSpace(assetUrl)) processor = new HttpDocumentAssetProcessor(http, new Uri(assetUrl),
+                using var assetHttp = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false,
+                    UseProxy = !(Uri.TryCreate(assetUrl, UriKind.Absolute, out var assetUri) && assetUri.IsLoopback) }) { Timeout = TimeSpan.FromMinutes(5) };
+                if (!string.IsNullOrWhiteSpace(assetUrl)) processor = new HttpDocumentAssetProcessor(assetHttp, new Uri(assetUrl),
                     Environment.GetEnvironmentVariable("BIMS_ASSET_VERSION") ?? throw new ArgumentException("Задайте BIMS_ASSET_VERSION."),
                     Environment.GetEnvironmentVariable("BIMS_ASSET_API_KEY"));
                 var indexing = new IndexingService(new(), tokenizer, embeddings, store, processor);
@@ -102,11 +113,23 @@ public static class RagCommands
             }
             IReranker reranker = new Bm25Reranker();
             var rerankEndpoint = Environment.GetEnvironmentVariable("BIMS_RERANK_URL");
+            using var rerankHttp = new HttpClient(new HttpClientHandler
+            { AllowAutoRedirect = false, UseProxy = !(Uri.TryCreate(rerankEndpoint, UriKind.Absolute, out var rerankUri) && rerankUri.IsLoopback) })
+            { Timeout = TimeSpan.FromMinutes(5) };
             if (!string.IsNullOrWhiteSpace(rerankEndpoint))
-                reranker = new SemanticReranker(http, new Uri(rerankEndpoint),
+                reranker = new SemanticReranker(rerankHttp, new Uri(rerankEndpoint),
                     Environment.GetEnvironmentVariable("BIMS_RERANK_MODEL") ?? "BAAI/bge-reranker-v2-m3",
                     Environment.GetEnvironmentVariable("BIMS_RERANK_API_KEY"));
-            var service = new RagService(embeddings, answerGenerator ?? api, store, new HybridRetriever(reranker), tokenizer);
+            IRetriever retriever = baseline
+     ? new CosineRetriever()
+     : new HybridRetriever(reranker);
+
+            var service = new RagService(
+                embeddings,
+                answerGenerator ?? api,
+                store,
+                retriever,
+                tokenizer);
             if (command == "compare")
             {
                 var result = await service.CompareAsync(args[2], topK, cancellationToken: cancellationToken);
@@ -131,6 +154,8 @@ public static class RagCommands
                 await output.WriteLineAsync(json
                     ? JsonSerializer.Serialize(Diagnostic(result), JsonIndexStore.JsonOptions)
                     : result.Text);
+                if (!json && !noRag)
+                    await output.WriteLineAsync($"Top-K: {result.Sources.Count}");
             }
             return 0;
         }
@@ -174,6 +199,7 @@ public static class RagCommands
                     await output.WriteLineAsync($"owner: {hit.Chunk.OwnerFamilyId}; dense_rank={hit.DenseRank}; lexical_rank={hit.LexicalRank}; lexical score: {hit.LexicalScore:F6}; mode: {hit.RerankerMode}; decision: {hit.SelectionReason}");
                     foreach (var warning in hit.Chunk.Warnings) await output.WriteLineAsync("warning: " + warning);
                     await output.WriteLineAsync($"text: {excerpt}");
+                    if (hit.MatchedPassage != null) await output.WriteLineAsync("matched passage: " + hit.MatchedPassage);
                     await output.WriteLineAsync();
                 }
                 foreach (var hit in group.Context.Where(h => !h.Selected))
@@ -186,6 +212,14 @@ public static class RagCommands
     private static object Diagnostic(RagAnswer answer) => new
     {
         answer = answer.Text, mode = answer.NoRag ? "no-rag" : "rag",
-        sources = answer.Sources.Select((h, i) => new { h.Chunk.Source, h.Chunk.Section, h.Chunk.ChunkId, h.Chunk.Strategy, h.SimilarityScore, h.RerankScore, final_rank = i + 1 })
+        sources = answer.Sources.Select((h, i) => new { h.Chunk.Source, h.Chunk.Section, h.Chunk.ChunkId, h.Chunk.Strategy, h.SimilarityScore, h.RerankScore, final_rank = i + 1 }),
+        questions = answer.RetrievedQuestions.Select(q => new
+        {
+            question = q.Question, scanned = q.ScannedCount,
+            candidates = q.Context.Select((h, i) => new { h.Chunk.ChunkId, h.Chunk.Section, h.Chunk.OwnerFamilyId,
+                h.SimilarityScore, h.LexicalScore, h.FusionScore, h.DenseRank, h.LexicalRank, h.RerankScore, h.RerankerMode,
+                h.ExactFamilyMatch, h.ExactTerms, h.Selected, h.SelectionReason, h.MatchedPassage,
+                fragment = h.Selected ? ContextAssembler.Fragment(h) : null, candidate_order = i + 1 })
+        })
     };
 }

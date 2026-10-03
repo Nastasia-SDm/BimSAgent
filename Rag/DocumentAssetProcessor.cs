@@ -19,14 +19,15 @@ public sealed class HttpDocumentAssetProcessor(HttpClient http, Uri endpoint, st
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         if (!string.IsNullOrWhiteSpace(key)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-        request.Content = JsonContent.Create(new { asset_id = asset.AssetId, media_part = asset.MediaPart,
-            content_hash = asset.ContentHash, image_base64 = Convert.ToBase64String(media), processor_version = Version });
+        request.Content = new StringContent(JsonSerializer.Serialize(new { asset_id = asset.AssetId, media_part = asset.MediaPart,
+            content_hash = asset.ContentHash, image_base64 = Convert.ToBase64String(media), processor_version = Version }), System.Text.Encoding.UTF8, "application/json");
         using var response = await http.SendAsync(request, cancellationToken);
         if (!response.IsSuccessStatusCode) throw new HttpRequestException("Asset processor HTTP " + (int)response.StatusCode);
         using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
         var root = json.RootElement;
         return asset with { OcrText = root.GetProperty("ocr_text").GetString() ?? "",
-            VisionText = root.GetProperty("vision_text").GetString() ?? "", Status = "processed_unverified", ProcessorVersion = Version };
+            VisionText = root.GetProperty("vision_text").GetString() ?? "",
+            Status = root.TryGetProperty("status", out var status) ? status.GetString() ?? "processed_unverified" : "processed_unverified", ProcessorVersion = Version };
     }
 }
 
@@ -36,7 +37,7 @@ public static class DocumentAssetProcessing
         IDocumentAssetProcessor? processor, CancellationToken cancellationToken)
     {
         if (processor == null) return document;
-        var cache = previous.Where(a => a.ContentHash != null && a.ProcessorVersion == processor.Version && a.Status == "processed_unverified")
+        var cache = previous.Where(a => a.ContentHash != null && a.ProcessorVersion == processor.Version && a.Status is "processed_unverified" or "ocr_only_unverified")
             .GroupBy(a => a.ContentHash!).ToDictionary(g => g.Key, g => g.First());
         using var archive = ZipFile.OpenRead(document.Source);
         var assets = new List<DocumentAsset>();
@@ -62,7 +63,7 @@ public static class DocumentAssetProcessing
             { assets.Add(asset with { Status = "processing_failed", ProcessorVersion = processor.Version }); }
         }
         var blocks = document.Blocks.ToList();
-        foreach (var asset in assets.Where(a => a.Status == "processed_unverified"))
+        foreach (var asset in assets.Where(a => a.Status is "processed_unverified" or "ocr_only_unverified"))
         {
             var original = document.Blocks.FirstOrDefault(b => b.AssetIds.Contains(asset.AssetId));
             if (original == null) continue;

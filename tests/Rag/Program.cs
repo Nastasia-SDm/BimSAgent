@@ -162,8 +162,8 @@ await api.GenerateAsync(new("Вопрос", comparison.Fixed.Sources, false, opt
 await api.GenerateAsync(new("Вопрос", [], true, options), default);
 var ragPayload = handler.Payloads[1];
 var baseline = handler.Payloads[2];
-Check(ragPayload.GetProperty("model").GetString() == "gpt-4.1-nano"
-    && baseline.GetProperty("model").GetString() == "gpt-4.1-nano"
+Check(ragPayload.GetProperty("model").GetString() == RagDefaults.AnswerModel
+    && baseline.GetProperty("model").GetString() == RagDefaults.AnswerModel
     && ragPayload.GetProperty("temperature").GetDouble() == baseline.GetProperty("temperature").GetDouble()
     && ragPayload.GetProperty("max_output_tokens").GetInt32() == baseline.GetProperty("max_output_tokens").GetInt32(), "HTTP same generation settings");
 using var baselineInput = JsonDocument.Parse(baseline.GetProperty("input").GetString()!);
