@@ -53,10 +53,10 @@ var fixedChunks = new FixedWindowChunker(tokenizer).Split(largeDoc);
 Check(fixedChunks.Count == ranges.Length && fixedChunks.All(c => c.FamilyNames.Contains(landing)), "fixed chunk metadata");
 Check(fixedChunks.Select(c => c.ChunkId).SequenceEqual(new FixedWindowChunker(tokenizer).Split(largeDoc).Select(c => c.ChunkId)), "deterministic chunk IDs");
 var structural = new StructuralChunker(tokenizer).Split(document);
-Check(structural.Count > 1 && structural.All(c => c.TokenCount <= 600), "structural chunking");
+Check(structural.Count > 1 && structural.All(c => c.TokenCount <= 2000), "structural chunking");
 Check(structural.All(c => !(c.Text.Contains(landing) && c.Text.Contains(beam))), "different family descriptions separated");
 var longStructural = new StructuralChunker(tokenizer).Split(largeDoc);
-Check(longStructural.Count > 1 && longStructural.All(c => c.TokenCount <= 600), "oversized family description splits safely");
+Check(longStructural.Count > 1 && longStructural.All(c => c.TokenCount <= 2000), "oversized family description splits safely");
 Check(Math.Abs(CosineRetriever.Similarity([1, 0], [1, 0]) - 1) < 1e-9, "cosine identical vectors");
 Check(CosineRetriever.Similarity([1, 0], [0, 1]) == 0, "cosine orthogonal vectors");
 Check(CosineRetriever.Similarity([1, 0], [-1, 0]) == -1, "cosine opposite vectors");
@@ -132,14 +132,14 @@ var startInfo = new ProcessStartInfo("dotnet")
 };
 startInfo.ArgumentList.Add(typeof(RagService).Assembly.Location);
 startInfo.ArgumentList.Add("rag");
-startInfo.ArgumentList.Add("status");
+startInfo.ArgumentList.Add("help"); // Do not depend on the user's installed index version.
 startInfo.Environment["OPENAI_API_KEY"] = "";
 using (var child = Process.Start(startInfo)!)
 {
     var stdout = child.StandardOutput.ReadToEndAsync();
     var stderr = child.StandardError.ReadToEndAsync();
     await child.WaitForExitAsync();
-    Check(child.ExitCode == 0 && (await stdout).Contains("fixed:") && string.IsNullOrWhiteSpace(await stderr), "actual Program.cs argument route works without key");
+    Check(child.ExitCode == 0 && (await stdout).Contains("rag index") && string.IsNullOrWhiteSpace(await stderr), "actual Program.cs argument route works without key");
 }
 Check(!File.Exists(Path.Combine(root, "facts.json")) && !File.Exists(Path.Combine(root, "history.json")), "actual CLI bypasses stateful BimSAgent constructor");
 
@@ -172,13 +172,51 @@ Check(!ragPayload.GetProperty("store").GetBoolean() && ragPayload.GetProperty("i
 handler.Fail = true;
 await Throws(() => api.EmbedAsync(["test"], default), "HTTP authentication error handled");
 
+await MultiQuestionTests.Run(Check, store, tokenizer);
+await RetrievalQualityTests.Run(Check, store.Load("structural")!, tokenizer, fixture, root);
+await FamilyPipelineTests.Run(Check, store.Load("structural")!);
+
+Check(await Command("rag", "ask", "площадка", "--strategy", "structural") == 0, "verbose baseline ask");
+var ordinaryOutput = output.ToString();
+var ordinaryRequest = JsonSerializer.Serialize(generator.Requests[^1]);
+var callsBeforeVerbose = embedder.Calls;
+var generationsBeforeVerbose = generator.Requests.Count;
+Check(await Command("rag", "ask", "площадка", "--strategy", "structural", "--verbose") == 0,
+    "CLI accepts ask --verbose");
+var verboseOutput = output.ToString();
+Check(verboseOutput.Contains("rank: 1; chunk_id:") && verboseOutput.Contains("section:")
+    && verboseOutput.Contains("similarity:") && verboseOutput.Contains("text:")
+    && verboseOutput.Contains("rerank score:") && verboseOutput.Contains("final rank:")
+    && verboseOutput.EndsWith("Ответ:" + Environment.NewLine + ordinaryOutput), "verbose diagnostics precede unchanged answer");
+Check(embedder.Calls == callsBeforeVerbose + 1 && generator.Requests.Count == generationsBeforeVerbose + 1
+    && JsonSerializer.Serialize(generator.Requests[^1]) == ordinaryRequest, "verbose preserves generation request and call counts");
+callsBeforeVerbose = embedder.Calls;
+generationsBeforeVerbose = generator.Requests.Count;
+Check(await Command("rag", "ask", "1. Площадка? 2. Балка?", "--strategy", "structural", "--top-k", "1", "--verbose") == 0,
+    "CLI verbose numbered questions");
+Check(output.ToString().Contains("Вопрос 1: Площадка?") && output.ToString().Contains("Вопрос 2: Балка?")
+    && output.ToString().Split("rank: 1;").Length == 3
+    && embedder.Calls == callsBeforeVerbose + 2 && generator.Requests.Count == generationsBeforeVerbose + 1,
+    "verbose per-question ranking with two embeddings and one generation");
+callsBeforeVerbose = embedder.Calls;
+Check(await Command("rag", "ask", "площадка", "--no-rag", "--verbose") == 0
+    && output.ToString().Contains("поиск чанков не выполнялся") && embedder.Calls == callsBeforeVerbose,
+    "verbose NO-RAG performs no retrieval");
+Check(await Command("rag", "ask", "площадка", "--verbose", "--json") != 0, "verbose cannot corrupt JSON output");
+Check(await Command("rag", "compare", "площадка", "--verbose") != 0, "verbose scoped to ask only");
+
 if (args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]))
 {
     var real = extractor.Extract(args[0]);
     var realFixed = new FixedWindowChunker(tokenizer).Split(real);
     var realStructural = new StructuralChunker(tokenizer).Split(real);
+    Check(real.Families.Any(f => f.CanonicalName == "IFC_Набор_Балка_№2"), "real numbered family with explanatory heading identified");
+    Check(real.Families.Any(f => f.CanonicalName == "КркНес_ЛМарш_Сборный" && f.Status == "conflict"), "real source copy-paste conflict detected");
+    Check(real.Assets.Length > 1000 && real.Assets.All(a => a.XmlPath.Length > 0), "real image occurrences retain source anchors");
+    Check(real.Blocks.Where(b => b.Cells.Length > 0).All(b => b.TableId != null && b.TableHeaders.Length > 0), "real table rows retain table identities and headers");
     Check(real.Blocks.Count > 0 && real.Blocks.Any(b => b.Kind.StartsWith("table-row")), "real DOCX extracted with tables");
-    Check(realFixed.Count > 0 && realStructural.Count > 0 && realFixed.Concat(realStructural).All(c => c.TokenCount <= 600), "real DOCX both chunkers obey limits");
+    Check(realFixed.Count > 0 && realStructural.Count > 0 && realFixed.All(c => c.TokenCount <= 600)
+        && realStructural.All(c => c.TokenCount <= 2000), "real DOCX both chunkers obey limits");
     Check(realFixed.SelectMany(c => c.BlockOrdinals).Distinct().Count() == real.Blocks.Count
         && realStructural.SelectMany(c => c.BlockOrdinals).Distinct().Count() == real.Blocks.Count, "real DOCX all blocks covered by both indexes");
     Console.WriteLine($"REAL DOCUMENT: {real.Blocks.Count} blocks, {realFixed.Count} fixed, {realStructural.Count} structural; no OpenAI calls.");

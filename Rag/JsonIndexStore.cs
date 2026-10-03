@@ -33,10 +33,12 @@ public sealed class JsonIndexStore(string directory) : IIndexStore
 
     public static void Validate(RagIndex index, string strategy)
     {
-        if (index.SchemaVersion != 1 || index.Strategy != strategy || index.EmbeddingModel != RagDefaults.EmbeddingModel
-            || index.Dimensions != RagDefaults.Dimensions || string.IsNullOrWhiteSpace(index.BuildId)
+        if (index.SchemaVersion != 3 || index.Manifest with { AssetProcessing = "unconfigured" } != IndexManifest.Current || index.Strategy != strategy || string.IsNullOrWhiteSpace(index.EmbeddingModel)
+            || index.Dimensions < 1 || string.IsNullOrWhiteSpace(index.BuildId)
             || string.IsNullOrWhiteSpace(index.ContentHash) || index.Chunks == null || index.Chunks.Length == 0)
             throw new InvalidDataException("Несовместимый или пустой индекс. Повторите rag index.");
+        try { new EmbeddingOptions(index.EmbeddingModel, index.Dimensions).Validate(); }
+        catch (ArgumentException e) { throw new InvalidDataException("Несовместимая embedding-конфигурация индекса. Повторите rag index.", e); }
         var ids = new HashSet<string>();
         foreach (var chunk in index.Chunks)
         {

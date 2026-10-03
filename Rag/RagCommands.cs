@@ -6,7 +6,7 @@ namespace BimSAgentApp.Rag;
 
 public static class RagCommands
 {
-    public const string Help = "rag index \"<docx>\" | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--top-k 5] [--json]";
+    public const string Help = "rag index \"<docx>\" | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--top-k <максимум>] [--json | --verbose]";
 
     public static string[] Split(string line)
     {
@@ -60,7 +60,9 @@ public static class RagCommands
             var strategySpecified = false;
             var noRag = false;
             var json = false;
-            var topK = 5;
+            var verbose = false;
+            var retrievalOnly = false;
+            int? topK = null;
             for (var i = 3; i < args.Length; i++)
             {
                 switch (args[i])
@@ -69,26 +71,42 @@ public static class RagCommands
                         strategyOption = args[++i]; strategySpecified = true; RagDefaults.ValidateStrategy(strategyOption); break;
                     case "--no-rag" when command == "ask": noRag = true; break;
                     case "--top-k" when command != "index" && i + 1 < args.Length:
-                        if (!int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out topK) || topK is < 1 or > 100)
+                        if (!int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out var parsedTopK) || parsedTopK is < 1 or > 100)
                             throw new ArgumentException("top-K должен быть от 1 до 100.");
+                        topK = parsedTopK;
                         break;
                     case "--json" when command != "index": json = true; break;
+                    case "--verbose" when command == "ask": verbose = true; break;
+                    case "--retrieval-only" when command == "ask": retrievalOnly = true; break;
                     default: throw new ArgumentException("Неизвестный или неполный параметр: " + args[i]);
                 }
             }
             if (noRag && strategySpecified) throw new ArgumentException("--no-rag не совмещается с --strategy.");
+            if (noRag && retrievalOnly) throw new ArgumentException("--retrieval-only не совмещается с --no-rag.");
+            if (verbose && json) throw new ArgumentException("--verbose не совмещается с --json.");
             using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
-            var api = new OpenAiRagClient(http);
+            var api = new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
             var embeddings = embeddingClient ?? api;
             var tokenizer = new RagTokenizer();
             if (command == "index")
             {
-                var indexing = new IndexingService(new(), tokenizer, embeddings, store);
+                IDocumentAssetProcessor? processor = null;
+                var assetUrl = Environment.GetEnvironmentVariable("BIMS_ASSET_URL");
+                if (!string.IsNullOrWhiteSpace(assetUrl)) processor = new HttpDocumentAssetProcessor(http, new Uri(assetUrl),
+                    Environment.GetEnvironmentVariable("BIMS_ASSET_VERSION") ?? throw new ArgumentException("Задайте BIMS_ASSET_VERSION."),
+                    Environment.GetEnvironmentVariable("BIMS_ASSET_API_KEY"));
+                var indexing = new IndexingService(new(), tokenizer, embeddings, store, processor);
                 var counts = await indexing.IndexAsync(args[2], cancellationToken);
                 await output.WriteLineAsync($"{(counts.Unchanged ? "Документ не изменился" : "Индексация завершена")}: fixed={counts.Fixed}, structural={counts.Structural}.");
                 return 0;
             }
-            var service = new RagService(embeddings, answerGenerator ?? api, store, new CosineRetriever(), tokenizer);
+            IReranker reranker = new Bm25Reranker();
+            var rerankEndpoint = Environment.GetEnvironmentVariable("BIMS_RERANK_URL");
+            if (!string.IsNullOrWhiteSpace(rerankEndpoint))
+                reranker = new SemanticReranker(http, new Uri(rerankEndpoint),
+                    Environment.GetEnvironmentVariable("BIMS_RERANK_MODEL") ?? "BAAI/bge-reranker-v2-m3",
+                    Environment.GetEnvironmentVariable("BIMS_RERANK_API_KEY"));
+            var service = new RagService(embeddings, answerGenerator ?? api, store, new HybridRetriever(reranker), tokenizer);
             if (command == "compare")
             {
                 var result = await service.CompareAsync(args[2], topK, cancellationToken: cancellationToken);
@@ -104,8 +122,15 @@ public static class RagCommands
             }
             else
             {
-                var result = await service.AskAsync(args[2], strategyOption, noRag, topK, cancellationToken: cancellationToken);
-                await output.WriteLineAsync(json ? JsonSerializer.Serialize(Diagnostic(result), JsonIndexStore.JsonOptions) : result.Text);
+                var result = retrievalOnly ? await service.RetrieveOnlyAsync(args[2], strategyOption, topK, cancellationToken)
+                    : await service.AskAsync(args[2], strategyOption, noRag, topK, cancellationToken: cancellationToken);
+                if (verbose) await WriteVerboseAsync(output, result);
+                if (!json)
+                    await output.WriteLineAsync();
+
+                await output.WriteLineAsync(json
+                    ? JsonSerializer.Serialize(Diagnostic(result), JsonIndexStore.JsonOptions)
+                    : result.Text);
             }
             return 0;
         }
@@ -122,9 +147,45 @@ public static class RagCommands
         }
     }
 
+    private static async Task WriteVerboseAsync(TextWriter output, RagAnswer answer)
+    {
+        if (answer.NoRag)
+            await output.WriteLineAsync("NO-RAG: поиск чанков не выполнялся.");
+        else
+        {
+            for (var question = 0; question < answer.RetrievedQuestions.Count; question++)
+            {
+                var group = answer.RetrievedQuestions[question];
+                await output.WriteLineAsync($"Вопрос {question + 1}: {group.Question}");
+                var chosen = group.Context.Where(h => h.Selected).ToArray();
+                await output.WriteLineAsync($"Проверено в индексе: {group.ScannedCount}; кандидатов рассмотрено: {group.Context.Count}; выбрано: {chosen.Length}.");
+                if (chosen.Length == 0) await output.WriteLineAsync("Релевантные чанки не найдены.");
+                for (var rank = 0; rank < chosen.Length; rank++)
+                {
+                    var hit = chosen[rank];
+                    var length = Math.Min(400, hit.Chunk.Text.Length);
+                    if (length < hit.Chunk.Text.Length && char.IsHighSurrogate(hit.Chunk.Text[length - 1])) length--;
+                    var excerpt = hit.Chunk.Text[..length] + (length < hit.Chunk.Text.Length ? "…" : "");
+                    await output.WriteLineAsync($"rank: {rank + 1}; chunk_id: {hit.Chunk.ChunkId}");
+                    await output.WriteLineAsync($"section: {hit.Chunk.Section}");
+                    await output.WriteLineAsync($"similarity: {hit.SimilarityScore.ToString("F6", CultureInfo.InvariantCulture)}");
+                    await output.WriteLineAsync($"rerank score: {hit.RerankScore?.ToString("F6", CultureInfo.InvariantCulture) ?? "n/a"}; final rank: {rank + 1}");
+                    await output.WriteLineAsync($"exact family: {hit.ExactFamilyMatch}; exact terms: {string.Join(", ", hit.ExactTerms)}");
+                    await output.WriteLineAsync($"owner: {hit.Chunk.OwnerFamilyId}; dense_rank={hit.DenseRank}; lexical_rank={hit.LexicalRank}; lexical score: {hit.LexicalScore:F6}; mode: {hit.RerankerMode}; decision: {hit.SelectionReason}");
+                    foreach (var warning in hit.Chunk.Warnings) await output.WriteLineAsync("warning: " + warning);
+                    await output.WriteLineAsync($"text: {excerpt}");
+                    await output.WriteLineAsync();
+                }
+                foreach (var hit in group.Context.Where(h => !h.Selected))
+                    await output.WriteLineAsync($"excluded: {hit.Chunk.ChunkId}; reason: {hit.SelectionReason}; section: {hit.Chunk.Section}");
+            }
+        }
+        await output.WriteLineAsync("Ответ:");
+    }
+
     private static object Diagnostic(RagAnswer answer) => new
     {
         answer = answer.Text, mode = answer.NoRag ? "no-rag" : "rag",
-        sources = answer.Sources.Select(h => new { h.Chunk.Source, h.Chunk.Section, h.Chunk.ChunkId, h.Chunk.Strategy, h.SimilarityScore })
+        sources = answer.Sources.Select((h, i) => new { h.Chunk.Source, h.Chunk.Section, h.Chunk.ChunkId, h.Chunk.Strategy, h.SimilarityScore, h.RerankScore, final_rank = i + 1 })
     };
 }
