@@ -12,6 +12,9 @@ public static class SearchLanguage
         if (word.Contains('_') || word.Any(char.IsDigit) || word.Length < 5 || word is "нельзя") return word;
         return Regex.Replace(word, @"(?:иями|ями|ами|ого|ему|ому|ыми|ими|ая|яя|ое|ее|ые|ие|ую|юю|ою|ею|ым|им|ых|их|ой|ый|ий|ей|ов|ев|ам|ям|ах|ях|ом|ем|ы|и|а|я|у|ю|е)$", "");
     }
+    public static string[] RetrievalTokens(string text) => Tokens(text).Concat(
+        Regex.Matches(text, @"[\p{L}\p{N}]+(?:_[\p{L}\p{N}]+)+")
+            .SelectMany(m => m.Value.Split('_')).Where(w => w.Length > 2).SelectMany(Tokens)).ToArray();
 }
 
 public sealed class HybridRetriever(IReranker? reranker = null) : IRetriever
@@ -25,10 +28,10 @@ public sealed class HybridRetriever(IReranker? reranker = null) : IRetriever
 
     private static RetrievalHit[] Candidates(RagIndex index, float[] query, string question, int? limit)
     {
-        var names = index.Families.Select(f => f.CanonicalName).Concat(index.Chunks.SelectMany(c => c.FamilyNames))
+        var names = index.Families.SelectMany(f => f.MemberNames.Length > 0 ? f.MemberNames : [f.CanonicalName]).Concat(index.Chunks.SelectMany(c => c.FamilyNames))
             .Distinct(StringComparer.OrdinalIgnoreCase).Where(n => FamilyIdentity.Contains(question, n)).ToArray();
-        var terms = SearchLanguage.Tokens(question).Distinct().ToArray();
-        var docs = index.Chunks.Select(c => SearchLanguage.Tokens(c.EmbeddingInput)).ToArray();
+        var terms = SearchLanguage.RetrievalTokens(question).Distinct().ToArray();
+        var docs = index.Chunks.Select(c => SearchLanguage.RetrievalTokens(c.Text + "\n" + c.Section + "\n" + string.Join(" ", c.FamilyNames))).ToArray();
         var average = Math.Max(1, docs.Average(d => d.Length));
         var idf = terms.ToDictionary(t => t, t => Math.Log(1 + (docs.Length - docs.Count(d => d.Contains(t)) + 0.5)
             / (docs.Count(d => d.Contains(t)) + 0.5)));
@@ -40,7 +43,7 @@ public sealed class HybridRetriever(IReranker? reranker = null) : IRetriever
                 var tf = frequencies.GetValueOrDefault(t);
                 return idf[t] * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * docs[i].Length / average));
             });
-            var exact = chunk.FamilyNames.Length == 1 && names.Contains(chunk.FamilyNames[0], StringComparer.OrdinalIgnoreCase);
+            var exact = chunk.FamilyNames.Any(n => names.Contains(n, StringComparer.OrdinalIgnoreCase));
             return new RetrievalHit(chunk, CosineRetriever.Similarity(query, chunk.Embedding))
             { LexicalScore = lexical, ExactTerms = terms.Where(frequencies.ContainsKey).ToArray(), ExactFamilyMatch = exact,
                 ExactFamilyInText = exact && names.Any(n => FamilyIdentity.Contains(chunk.Text, n)), Selected = false };
@@ -64,7 +67,9 @@ public sealed class HybridRetriever(IReranker? reranker = null) : IRetriever
         var exactQuery = ranked.Any(h => h.ExactFamilyMatch);
         var eligible = new List<RetrievalHit>(); var rejected = new List<RetrievalHit>();
         var semantic = ranked.Any(h => h.RerankerMode.StartsWith("cross_encoder:", StringComparison.Ordinal));
-        var scores = ranked.Where(h => semantic || h.LexicalScore == 0).Select(h => semantic ? h.RerankScore ?? 0 : h.SimilarityScore)
+        var scores = ranked.Where(h => (!exactQuery || h.ExactFamilyMatch)
+            && !h.Chunk.Warnings.Any(w => w.StartsWith("source_conflict", StringComparison.Ordinal)))
+            .Where(h => semantic || h.LexicalScore == 0).Select(h => semantic ? h.RerankScore ?? 0 : h.SimilarityScore)
             .OrderDescending().Take(20).ToArray();
         var minimum = Environment.GetEnvironmentVariable("BIMS_RERANK_MIN_SCORE");
         var semanticFloor = -2.5;
@@ -73,7 +78,8 @@ public sealed class HybridRetriever(IReranker? reranker = null) : IRetriever
         var cutoff = semantic ? semanticFloor : 0.25;
         // Gap supplements an absolute floor; scores are not probabilities.
         var largestGap = semantic ? 2.0 : 0.15;
-        for (var i = 1; i < scores.Length; i++)
+        // A single high-scoring chunk must not collapse a broad family search to one result.
+        for (var i = exactQuery ? 1 : 3; i < scores.Length; i++)
             if (scores[i - 1] - scores[i] > largestGap) { largestGap = scores[i - 1] - scores[i]; cutoff = Math.Max(cutoff, scores[i - 1]); }
         foreach (var hit in ranked)
         {

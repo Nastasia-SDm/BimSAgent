@@ -58,6 +58,13 @@ static class MultiQuestionTests
             && ragInput.RootElement.GetProperty("questions").EnumerateArray().All(q => q.GetProperty("fragments").GetArrayLength() == 1), "HTTP prompt groups questions with their fragments");
         check(noRagInput.RootElement.GetProperty("questions").EnumerateArray().All(q => q.GetProperty("fragments").GetArrayLength() == 0), "HTTP NO-RAG has no context");
         check(handler.Payloads.All(p => p.GetProperty("instructions").GetString()!.Contains("1. <ответ>")), "HTTP prompt specifies numbered output");
+        check(!handler.Payloads[1].GetProperty("instructions").GetString()!.Contains("Если доказательств недостаточно"),
+            "NO-RAG does not demand unavailable documentary evidence");
+        await api.GenerateAsync(new("Один вопрос чата", [], false, new(), [contexts[0]])
+            { Chat = new(new(), [], null) }, default);
+        using var chatInput = JsonDocument.Parse(handler.Payloads[^1].GetProperty("input").GetString()!);
+        check(chatInput.RootElement.GetProperty("questions")[0].GetProperty("fragments").GetArrayLength() == 1
+            && chatInput.RootElement.TryGetProperty("chat_context", out _), "single chat question sends actual fragments and chat context over HTTP");
     }
 
     sealed class Embeddings : IEmbeddingClient

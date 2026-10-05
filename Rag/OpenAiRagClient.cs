@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace BimSAgentApp.Rag;
 
 // This client deliberately has no access to conversation state or MCP.
-public sealed class OpenAiRagClient(HttpClient http, Func<string?>? keyProvider = null, EmbeddingOptions? embeddingOptions = null)
+public sealed partial class OpenAiRagClient(HttpClient http, Func<string?>? keyProvider = null, EmbeddingOptions? embeddingOptions = null)
     : IEmbeddingClient, IRagAnswerGenerator
 {
     private readonly Func<string?> _key = keyProvider ?? (() => Environment.GetEnvironmentVariable("OPENAI_API_KEY"));
@@ -50,11 +50,14 @@ public sealed class OpenAiRagClient(HttpClient http, Func<string?>? keyProvider 
             instructions += " Не смешивай свойства разных owner_family_id. Копируй названия семейств точно из family_names. " +
                 "Не выводи пользователю chunk_id, owner_family_id, similarity, rank и другую техническую информацию поиска. " +
                 "Если в найденном фрагменте есть прямой достаточный ответ, сохраняй технические термины и формулировку максимально близко к источнику. " +
-                "Не добавляй неподтверждённые сведения и ненужную сопутствующую информацию. " +
-                "Отвечай естественно и структурированно: не помещай весь ответ в одну длинную строку, разделяй разные мысли на отдельные абзацы. " +
-                "Не ставь маркеры, ромбы, точки или другие символы перед отдельными предложениями и абзацами внутри ответа. " +
+                "Если ответ содержит несколько отдельных причин, действий или условий, каждое помещай на отдельную строку. " +
+                "Самостоятельно не нумеруй эти строки: нумерацию добавит приложение. " +
                 "При конфликте источника явно сообщи о нём. Изображения без распознанного содержимого не подтверждают фактов. " +
-                "OCR и vision_interpretation являются непроверенным машинным извлечением. Не подтверждай размеры, идентификаторы и геометрические связи только по ним; сообщай, что нужна проверка изображения. " +
+                "OCR и vision_interpretation являются машинным извлечением. OCR подтверждает только распознанные надписи, не форму объекта. " +
+                "По vision_interpretation можно описать явно наблюдаемый внешний вид со status=uncertain и словами «По распознанному изображению». Цитируй дословное описание. " +
+                "Если вопрос о внешнем виде и visual_evidence содержит описание формы нужного семейства, ответь по этому описанию. Не требуй новое изображение только потому, что описание машинное или схематичное. " +
+                "Не добавляй невидимые детали, размеры, материал, назначение или геометрические связи, которых описание не подтверждает. " +
+                "Если vision отсутствует или описывает только интерфейс, не восстанавливай форму по названию семейства; запроси изображение общего вида. " +
                 "Шаблонное введение, навигация и путь библиотеки не являются назначением семейства.";
         if (request.Questions is { Count: > 1 })
             instructions += " Ответь отдельно на каждый вопрос из questions, строго в исходном порядке. " +
@@ -65,15 +68,25 @@ public sealed class OpenAiRagClient(HttpClient http, Func<string?>? keyProvider 
              "Каждый ответ — максимум 1 короткое предложение. Не повторяй вопрос. Не добавляй пояснения, которых не спрашивали." +
              "Без вступления и заключения. Каждый ответ — максимум 1–2 коротких предложения. Не добавляй пояснения, которых не спрашивали.";
         instructions += " Верни JSON по заданной схеме: один объект answers на каждый вопрос, number с 1. " +
-     "В text запиши только естественный короткий ответ без номера и технических идентификаторов. " +
-     "В RAG для supported/uncertain приведи evidence только с короткой дословной цитатой из переданных фрагментов. " +
+     "В text запиши только естественный короткий ответ без номера и технических идентификаторов. ";
+        if (!request.NoRag)
+            instructions += "В RAG для supported/uncertain приведи evidence только с короткой дословной цитатой из переданных фрагментов. " +
      "Не указывай chunk_id: приложение определит источник цитаты самостоятельно. " +
      "Если доказательств недостаточно, status=unknown, evidence=[] и в text напиши строго в формате: " +
      "«Не знаю. Для корректного ответа укажите дополнительно - <конкретно какие данные нужны именно для ответа на этот вопрос>.» " +
-     "Не пиши общие фразы вроде «нужны дополнительные данные». Укажи конкретный параметр, тип элемента, семейство, условие или другую информацию, которую пользователь должен уточнить. " +
-     "В NO-RAG evidence=[]; источники не выдумывай. Нумерацию, chunk_id и оформление выполнит приложение.";
+     "Не пиши общие фразы вроде «нужны дополнительные данные». Укажи конкретный параметр, тип элемента, семейство, условие или другую информацию, которую пользователь должен уточнить. ";
+        else
+            instructions += "В NO-RAG evidence=[]; отвечай по своим знаниям без требования документальных цитат. " +
+                "Используй status=supported для известного ответа, uncertain при неуверенности и unknown, если ответа не знаешь. Источники не выдумывай. ";
+        instructions += "Нумерацию, chunk_id и оформление выполнит приложение.";
+        if (request.Chat != null)
+            instructions += " Это последовательный RAG-чат. Учитывай chat_context: цель, ограничения, термины, решения, историю и текущую задачу. " +
+                "История и task state нужны для понимания запроса, но не являются доказательством свойств семейств. " +
+                "Подтверждай факты и цитируй только fragments текущего вопроса. Старые ответы не заменяют новый поиск. " +
+                "Не меняй этап задачи и не утверждай, что выполнил действия в Revit. При неоднозначном указании «это» уточни конкретный вариант. " +
+                "Если нет проверяемого ответа, используй unknown и запроси конкретное семейство, параметр или условие, отсутствующее в текущем вопросе.";
         object Fragments(IReadOnlyList<RetrievalHit> context) => context.Select(ContextAssembler.Fragment);
-        var input = request.Questions is { Count: > 1 } questions
+        var input = request.Questions is { Count: > 0 } questions
             ? JsonSerializer.Serialize(new
             {
                 questions = questions.Select((q, i) => new { number = i + 1, question = q.Question, fragments = Fragments(q.Context) })
@@ -83,14 +96,25 @@ public sealed class OpenAiRagClient(HttpClient http, Func<string?>? keyProvider 
             question = request.Question,
             fragments = Fragments(request.Context)
         }, JsonIndexStore.JsonOptions);
+        if (request.Chat != null)
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(input)!;
+            node["chat_context"] = JsonSerializer.SerializeToNode(request.Chat, JsonIndexStore.JsonOptions);
+            input = node.ToJsonString(JsonIndexStore.JsonOptions);
+        }
         var inputTokens = new RagTokenizer().Count(input) + new RagTokenizer().Count(instructions);
         if (inputTokens + request.Options.MaxOutputTokens > 70000)
             throw new InvalidOperationException("Общий запрос превышает бюджет RAG. Разделите список вопросов.");
         using var json = await PostAsync("responses", new
         {
-            model = RagDefaults.AnswerModel, instructions, input, store = false, truncation = "disabled",
-            temperature = request.Options.Temperature, max_output_tokens = request.Options.MaxOutputTokens
-            , text = new { format = new { type = "json_schema", name = "rag_answer", strict = true, schema = AnswerEvidenceValidator.Schema } }
+            model = RagDefaults.AnswerModel,
+            instructions,
+            input,
+            store = false,
+            truncation = "disabled",
+            reasoning = new { effort = "low" },
+            max_output_tokens = request.Options.MaxOutputTokens,
+            text = new { format = new { type = "json_schema", name = "rag_answer", strict = true, schema = AnswerEvidenceValidator.Schema } }
         }, cancellationToken);
         var root = json.RootElement;
         if (root.TryGetProperty("status", out var status) && status.GetString() != "completed")
@@ -125,10 +149,40 @@ public sealed class OpenAiRagClient(HttpClient http, Func<string?>? keyProvider 
                 await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(delay.TotalSeconds, 0, 30)), cancellationToken);
                 continue;
             }
-            // Never expose response bodies or credentials through diagnostics.
             if (!response.IsSuccessStatusCode)
-                throw new InvalidOperationException($"OpenAI {endpoint}: HTTP {(int)response.StatusCode}. Проверьте ключ, доступ и лимиты API.");
+                throw await ApiErrorAsync(response, endpoint, cancellationToken);
             return await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
         }
+    }
+
+    private static async Task<InvalidOperationException> ApiErrorAsync(HttpResponseMessage response, string endpoint, CancellationToken token)
+    {
+        // Do not expose the server's free-text message: it can echo credentials or document input.
+        var details = new List<string>();
+        try
+        {
+            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token));
+            if (body.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+            {
+                if (error.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String
+                    && code.GetString() is "unsupported_parameter" or "unsupported_value" or "invalid_json_schema" or "context_length_exceeded")
+                    details.Add("code=" + code.GetString());
+                if (error.TryGetProperty("param", out var param) && param.ValueKind == JsonValueKind.String
+                    && param.GetString() is "temperature" or "top_p" or "model" or "reasoning" or "reasoning.effort"
+                        or "max_output_tokens" or "text.format.schema" or "text.format" or "input" or "truncation")
+                    details.Add("param=" + param.GetString());
+            }
+        }
+        catch (JsonException) { }
+        var hint = response.StatusCode switch
+        {
+            HttpStatusCode.BadRequest => "Некорректные или несовместимые с моделью параметры запроса.",
+            HttpStatusCode.Unauthorized => "Проверьте OpenAI API key.",
+            HttpStatusCode.Forbidden => "Проверьте доступ к модели.",
+            HttpStatusCode.TooManyRequests => "Проверьте квоту и лимиты API.",
+            _ => "Не удалось выполнить запрос к OpenAI."
+        };
+        return new($"OpenAI {endpoint}: HTTP {(int)response.StatusCode}" +
+            (details.Count > 0 ? " (" + string.Join("; ", details) + ")" : "") + ". " + hint);
     }
 }

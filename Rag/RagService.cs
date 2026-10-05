@@ -32,9 +32,42 @@ public sealed class CosineRetriever : IRetriever
 }
 
 public sealed class RagService(IEmbeddingClient embeddings, IRagAnswerGenerator generator,
-    IIndexStore store, IRetriever retriever, RagTokenizer tokenizer)
+    IIndexStore store, IRetriever retriever, RagTokenizer tokenizer, ChatVisualContext? visualContext = null)
 {
     private const int ContextTokens = 6000;
+
+    public async Task<RagAnswer> AskChatAsync(string message, IReadOnlyList<string> queries, RagChatContext chat,
+        string strategy, int? topK, CancellationToken cancellationToken)
+    {
+        ValidateQuestion(message, topK);
+        var questions = QuestionParser.Split(message);
+        if (queries.Count != questions.Count) throw new InvalidDataException("Число поисковых запросов не совпадает с вопросами.");
+        RagDefaults.ValidateStrategy(strategy);
+        var index = RequireIndex(strategy); // Reload on every turn; never reuse old chunks.
+        var diagnostics = new List<RagQuestionContext>();
+        var contexts = new List<RagQuestionContext>();
+        for (var i = 0; i < questions.Count; i++)
+        {
+            ValidateQuestion(queries[i], topK);
+            // Keep the user's terminology even when the planner paraphrases a construction term.
+            var searchQuestion = questions[i] == queries[i] ? queries[i]
+                : questions[i] + "\nУточнение из текущего диалога: " + queries[i];
+            ValidateQuestion(searchQuestion, topK);
+            var selection = await SelectContext(index, await QueryEmbedding(searchQuestion, cancellationToken), searchQuestion, topK, cancellationToken);
+            if (visualContext != null && (ChatVisualContext.IsAppearance(questions[i]) || ChatVisualContext.IsAppearance(queries[i])))
+            {
+                selection = await visualContext.ExpandAsync(index, selection, queries[i], topK, cancellationToken);
+                selection = new ContextAssembler(tokenizer).Assemble(selection, ContextTokens, index);
+            }
+            diagnostics.Add(new(questions[i], selection.Candidates) { ScannedCount = selection.ScannedCount });
+            contexts.Add(new(questions[i], selection.Candidates.Where(h => h.Selected).ToArray()));
+        }
+        var request = new RagAnswerRequest(message, [], false,
+            new AnswerOptions { MaxOutputTokens = Math.Min(12000, Math.Max(1200, questions.Count * 500)) }, contexts) { Chat = chat };
+        // Even empty retrieval needs a question-specific clarification, not a generic cached answer.
+        var answer = await generator.GenerateAsync(request, cancellationToken);
+        return new(answer, contexts.SelectMany(c => c.Context).ToArray(), false) { RetrievedQuestions = diagnostics };
+    }
 
     public async Task<RagAnswer> AskAsync(string question, string strategy = "fixed", bool noRag = false,
         int? topK = null, AnswerOptions? options = null, CancellationToken cancellationToken = default)
@@ -102,7 +135,7 @@ public sealed class RagService(IEmbeddingClient embeddings, IRagAnswerGenerator 
             throw new InvalidOperationException("Structural-индекс создан с прежним размером чанка. Выполните rag index для размера 2000 токенов.");
         if (index.EmbeddingModel != embeddings.Options.Model || index.Dimensions != embeddings.Options.Dimensions)
             throw new InvalidOperationException("Embedding-конфигурация не совпадает с индексом. Восстановите прежние настройки или выполните rag index.");
-        return index;
+        return SharedFamilySections.Enrich(index);
     }
 
     private void ValidateQuestion(string question, int? topK)

@@ -1,5 +1,3 @@
-using System.Text.RegularExpressions;
-
 namespace BimSAgentApp.Rag;
 
 public interface IReranker
@@ -12,17 +10,11 @@ public interface IReranker
 // Local, query-dependent second stage; no HTTP, embeddings or generation.
 public sealed class Bm25Reranker : IReranker
 {
-    private static readonly HashSet<string> StopWords = new(
-        "как какой какая какие какое для про при это что где когда нужно можно надо есть или чем почему который которого чтобы этого этой если the and with what how".Split(' '));
-    private static string[] Tokens(string text) => Regex.Matches(text.ToLowerInvariant().Replace('ё', 'е'), @"[\p{L}\p{N}_]+")
-        .Select(m => m.Value).Where(w => w.Length > 2 && !StopWords.Contains(w)).ToArray();
+    private static string[] Tokens(string text) => SearchLanguage.RetrievalTokens(text);
 
     public IReadOnlyList<RetrievalHit> Rerank(string question, IReadOnlyList<RetrievalHit> candidates)
     {
         if (candidates.Count == 0) return [];
-        if (candidates.All(h => h.FusionScore > 0))
-            return candidates.Select(h => h with { RerankScore = h.FusionScore, RerankerMode = "lexical_fallback" })
-                .OrderByDescending(h => h.RerankScore).ThenBy(h => h.Chunk.ChunkId, StringComparer.Ordinal).ToArray();
         var terms = Tokens(question).Distinct().ToArray();
         var docs = candidates.Select(h => Tokens(h.Chunk.Text)).ToArray();
         var averageLength = Math.Max(1, docs.Average(d => d.Length));
@@ -48,9 +40,12 @@ public sealed class Bm25Reranker : IReranker
             for (var start = 0; start < docs[i].Length; start += 96)
                 bestPassage = Math.Max(bestPassage, Bm25(docs[i].Skip(start).Take(128).ToArray(), Math.Min(128, averageLength)));
             var lexical = 0.4 * full + 0.6 * bestPassage;
+            var heading = Tokens(string.Join(" ", hit.Chunk.FamilyNames) + " " + hit.Chunk.Section).ToHashSet();
+            var coverage = terms.Length == 0 ? 0 : (double)terms.Count(docs[i].Contains) / terms.Length;
+            var titleCoverage = terms.Length == 0 ? 0 : (double)terms.Count(heading.Contains) / terms.Length;
             var score = terms.Length == 0 ? hit.SimilarityScore
-                : 0.4 * hit.SimilarityScore + 0.6 * lexical / (1 + lexical);
-            return hit with { RerankScore = hit.FusionScore > 0 ? hit.FusionScore : score, RerankerMode = "lexical_fallback" };
+                : 0.30 * hit.SimilarityScore + 0.45 * lexical / (1 + lexical) + 0.15 * coverage + 0.10 * titleCoverage;
+            return hit with { RerankScore = score, RerankerMode = "lexical_fallback" };
         }).OrderByDescending(h => h.RerankScore).ThenBy(h => h.Chunk.ChunkId, StringComparer.Ordinal).ToArray();
     }
 }

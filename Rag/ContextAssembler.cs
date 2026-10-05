@@ -34,10 +34,13 @@ public sealed class ContextAssembler(RagTokenizer tokenizer)
         source = hit.Chunk.Source, section = hit.Chunk.Section, chunk_id = hit.Chunk.ChunkId,
         text = hit.Chunk.Text, family_names = hit.Chunk.FamilyNames, owner_family_id = hit.Chunk.OwnerFamilyId,
         family_purpose = hit.Chunk.FamilyPurpose, purpose_source_blocks = hit.Chunk.PurposeBlockIds,
-        tables = hit.Chunk.Tables, inherited_context = hit.Chunk.InheritedContext,
-        ownership_ranges = hit.Chunk.Spans,
+        tables = hit.Chunk.Tables,
+        inherited_context = hit.Chunk.InheritedContext.Select(b => new { block_id = b.BlockId, text = b.Text, kind = b.Kind, warnings = b.Warnings }),
+        // Full per-character ownership ranges remain in the persisted chunk. Sending them
+        // to the generator can consume the context budget before a second family fits.
         warnings = hit.Chunk.Warnings, asset_ids = hit.Chunk.AssetIds,
+        visual_evidence = hit.Chunk.VisualEvidence,
         family_source_warnings = hit.Chunk.FamilyWarnings,
-        image_notice = hit.Chunk.AssetIds.Length > 0 ? "Изображения могут быть не обработаны; не восстанавливай отсутствующие сведения." : null
+        image_notice = hit.Chunk.AssetIds.Length > 0 ? "Используй только явно приведённые OCR/vision-данные; наличие asset_id само по себе не подтверждает внешний вид." : null
     };
 }

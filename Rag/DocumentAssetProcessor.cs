@@ -36,8 +36,7 @@ public static class DocumentAssetProcessing
     public static async Task<ExtractedDocument> ProcessAsync(ExtractedDocument document, IEnumerable<DocumentAsset> previous,
         IDocumentAssetProcessor? processor, CancellationToken cancellationToken)
     {
-        if (processor == null) return document;
-        var cache = previous.Where(a => a.ContentHash != null && a.ProcessorVersion == processor.Version && a.Status is "processed_unverified" or "ocr_only_unverified")
+        var cache = previous.Where(a => a.ContentHash != null && (processor == null || a.ProcessorVersion == processor.Version) && a.Status is "processed_unverified" or "ocr_only_unverified")
             .GroupBy(a => a.ContentHash!).ToDictionary(g => g.Key, g => g.First());
         using var archive = ZipFile.OpenRead(document.Source);
         var assets = new List<DocumentAsset>();
@@ -47,6 +46,7 @@ public static class DocumentAssetProcessing
             if (asset.ContentHash == null || asset.MediaPart == null) { assets.Add(asset); continue; }
             if (cache.TryGetValue(asset.ContentHash, out var cached))
             { assets.Add(asset with { OcrText = cached.OcrText, VisionText = cached.VisionText, Status = cached.Status, ProcessorVersion = cached.ProcessorVersion }); continue; }
+            if (processor == null) { assets.Add(asset); continue; }
             var entry = archive.GetEntry(asset.MediaPart);
             if (entry == null) { assets.Add(asset with { Status = "missing" }); continue; }
             try
@@ -70,7 +70,7 @@ public static class DocumentAssetProcessing
             foreach (var (kind, text) in new[] { ("ocr", asset.OcrText), ("vision_interpretation", asset.VisionText) })
             {
                 if (string.IsNullOrWhiteSpace(text)) continue;
-                blocks.Add(original with { Ordinal = blocks.Count + 1, BlockId = RagDefaults.Hash(asset.AssetId + "|" + kind + "|" + processor.Version),
+                blocks.Add(original with { Ordinal = blocks.Count + 1, BlockId = RagDefaults.Hash(asset.AssetId + "|" + kind + "|" + asset.ProcessorVersion),
                     Kind = kind, Text = $"[{kind}: машинное извлечение, требуется проверка по изображению {asset.MediaPart}]\n{text}",
                     AssetIds = [asset.AssetId], Warnings = ["machine_extracted_unverified"], Cells = [], TableHeaders = [], TableId = null, Row = null });
             }

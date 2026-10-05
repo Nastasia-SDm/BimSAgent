@@ -18,27 +18,79 @@ public static class AnswerEvidenceValidator
     public static string ValidateAndRender(string payload, RagAnswerRequest request)
     {
         var contexts = request.Questions ?? [new RagQuestionContext(request.Question, request.Context)];
-        string Render(IEnumerable<string> texts) =>
-        string.Join(Environment.NewLine, texts.Select((s, i) => $"⬪ {i + 1}. {s}"));
+        string Unknown(int i) => request.Chat == null ? RagDefaults.Unknown :
+            "Не знаю. Для корректного ответа укажите дополнительно - " +
+            (Regex.IsMatch(contexts[i].Question, "выгляд|внешн.*вид", RegexOptions.IgnoreCase)
+                ? "читаемое изображение общего вида или разреза элемента для вопроса «"
+                : Regex.IsMatch(contexts[i].Question, "параметр|размер|толщин", RegexOptions.IgnoreCase)
+                ? "точное имя параметра, семейство и типоразмер, к которым относится вопрос «"
+                : "категорию элемента, семейство или условия применения для вопроса «") +
+            contexts[i].Question[..Math.Min(180, contexts[i].Question.Length)] + "».";
+        string Render(IEnumerable<string> texts)
+        {
+            string Format(string text)
+            {
+                var lines = text
+                    .Split('\n')
+                    .Select(x => x.Trim())
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToArray();
+
+                var contentLines = lines
+                    .TakeWhile(x =>
+                        !x.StartsWith("▫️ Цитаты:", StringComparison.Ordinal) &&
+                        !x.StartsWith("▫️ Источники:", StringComparison.Ordinal))
+                    .ToArray();
+
+                var metadataLines = lines.Skip(contentLines.Length).ToArray();
+
+                var result = new List<string>();
+
+                if (contentLines.Length == 1)
+                {
+                    result.Add($"➤ {contentLines[0]}");
+                }
+                else
+                {
+                    for (var i = 0; i < contentLines.Length; i++)
+                        result.Add(i == 0
+                            ? $"➤ {i + 1}. {contentLines[i]}"
+                            : $"  {i + 1}. {contentLines[i]}");
+                }
+
+                result.AddRange(metadataLines);
+
+    return string.Join(Environment.NewLine, result);
+}
+
+            return string.Join(Environment.NewLine, texts.Select(Format));
+        }
         try
         {
             using var json = JsonDocument.Parse(payload);
             var answers = json.RootElement.GetProperty("answers").EnumerateArray().ToArray();
-            if (answers.Length != contexts.Count) return Render(contexts.Select(_ => RagDefaults.Unknown));
+            if (answers.Length != contexts.Count) return Render(contexts.Select((_, i) => Unknown(i)));
             var rendered = new List<string>();
             for (var i = 0; i < answers.Length; i++)
             {
                 var item = answers[i];
-                if (item.GetProperty("number").GetInt32() != i + 1) { rendered.Add(RagDefaults.Unknown); continue; }
+                if (item.GetProperty("number").GetInt32() != i + 1) { rendered.Add(Unknown(i)); continue; }
                 var text = item.GetProperty("text").GetString()?.Trim() ?? "";
                 var status = item.GetProperty("status").GetString();
                 if (text.Length == 0 || status is not ("supported" or "uncertain" or "unknown"))
-                { rendered.Add(RagDefaults.Unknown); continue; }
+                { rendered.Add(Unknown(i)); continue; }
                 if (request.NoRag) { rendered.Add(text); continue; }
-                if (status == "unknown") { rendered.Add(text); continue; }
+                if (status == "unknown")
+                {
+                    const string prefix = "Не знаю. Для корректного ответа укажите дополнительно - ";
+                    var specific = text.StartsWith(prefix, StringComparison.Ordinal) && text.Length > prefix.Length + 12
+                        && !Regex.IsMatch(text, "нужн[а-я]* (больше информации|дополнительные данные)", RegexOptions.IgnoreCase);
+                    rendered.Add(request.Chat == null || specific ? text : Unknown(i)); continue;
+                }
                 var evidence = item.GetProperty("evidence").EnumerateArray().ToArray();
-                var valid = evidence.Length > 0;
+                var valid = evidence.Length > 0 && (request.Chat == null || !text.Contains("chunk_id", StringComparison.OrdinalIgnoreCase));
                 var verified = new List<(string ChunkId, string Quote)>();
+                var visualAnswer = false;
 
                 foreach (var citation in evidence)
                 {
@@ -59,11 +111,16 @@ public static class AnswerEvidenceValidator
                     if (hit == null) { valid = false; break; }
                     if (status == "supported" && hit.Chunk.Warnings.Contains("machine_extracted_unverified"))
                     {
-                        valid = false;
-                        break;
+                        // A visible observation is usable with an explicit machine-recognition caveat.
+                        // Keep the stricter rule for dimensions, parameters and other technical claims.
+                        var appearance = ChatVisualContext.IsAppearance(contexts[i].Question);
+                        if (!appearance || !hit.Chunk.VisualEvidence.Any(v => Normalize(v).Contains(quote, StringComparison.Ordinal)))
+                        { valid = false; break; }
+                        visualAnswer = true;
                     }
 
                     verified.Add((hit.Chunk.ChunkId, rawQuote));
+                    visualAnswer |= hit.Chunk.VisualEvidence.Any(v => Normalize(v).Contains(quote, StringComparison.Ordinal));
                 }
 
             var names = contexts[i].Context.SelectMany(h => h.Chunk.FamilyNames).Distinct().ToArray();
@@ -76,9 +133,11 @@ public static class AnswerEvidenceValidator
                 }
                 if (!valid)
                 {
-                    rendered.Add(RagDefaults.Unknown);
+                    rendered.Add(Unknown(i));
                     continue;
                 }
+                if (visualAnswer && !text.Contains("распознан", StringComparison.OrdinalIgnoreCase))
+                    text = "По распознанному изображению: " + text;
 
                 var chunkIds = verified
                     .Select(v => v.ChunkId)
@@ -89,16 +148,16 @@ public static class AnswerEvidenceValidator
                     .Select(v => $"\"{v.Quote}\"");
 
                 rendered.Add(
-                    text +
-                    Environment.NewLine + "▫️ Источники:" +
-                    Environment.NewLine + string.Join(Environment.NewLine, chunkIds) +
-                    Environment.NewLine + "▫️ Цитаты:" +
-                    Environment.NewLine + string.Join(Environment.NewLine, quotes));
+     text +
+     Environment.NewLine + "▫️ Цитаты:" +
+     Environment.NewLine + string.Join(Environment.NewLine, quotes) +
+     Environment.NewLine + "▫️ Источники:" +
+     Environment.NewLine + string.Join(Environment.NewLine, chunkIds));
             }
             return Render(rendered);
         }
         catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
-        { return Render(contexts.Select(_ => RagDefaults.Unknown)); }
+        { return Render(contexts.Select((_, i) => Unknown(i))); }
     }
     private static string Normalize(string text) => Regex.Replace(text.Normalize(), @"\s+", " ").Trim();
 }

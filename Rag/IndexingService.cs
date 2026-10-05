@@ -1,7 +1,8 @@
 namespace BimSAgentApp.Rag;
 
 public sealed class IndexingService(DocxDocumentExtractor extractor, RagTokenizer tokenizer,
-    IEmbeddingClient embeddings, IIndexStore store, IDocumentAssetProcessor? assetProcessor = null)
+    IEmbeddingClient embeddings, IIndexStore store, IDocumentAssetProcessor? assetProcessor = null,
+    OpenAiRagClient? visionClient = null, string? visionFamily = null)
 {
     public async Task<(int Fixed, int Structural, bool Unchanged)> IndexAsync(string path, CancellationToken cancellationToken)
     {
@@ -18,12 +19,16 @@ public sealed class IndexingService(DocxDocumentExtractor extractor, RagTokenize
         var existingStructural = LoadExisting("structural");
         var manifest = IndexManifest.Current with { AssetProcessing = assetProcessor?.Version ?? "unconfigured" };
         bool Matches(RagIndex? i) => i != null && i.Source == document.Source && i.ContentHash == document.ContentHash
+            && document.Families.All(f => i.Families.Any(old => old.FamilyId == f.FamilyId && old.MemberNames.SequenceEqual(f.MemberNames)))
             && i.SchemaVersion == 3 && i.Manifest == manifest && i.ChunkSize == (i.Strategy == "structural" ? 2000 : 600) && i.Overlap == 100
             && i.EmbeddingModel == embeddings.Options.Model && i.Dimensions == embeddings.Options.Dimensions;
-        if (Matches(existingFixed) && Matches(existingStructural) && existingFixed!.BuildId == existingStructural!.BuildId)
+        // A matching document may still need to retry transient OCR failures.
+        var retryAssets = assetProcessor != null && existingStructural?.Assets.Any(a => a.Status == "processing_failed") == true;
+        if (visionClient == null && !retryAssets && Matches(existingFixed) && Matches(existingStructural) && existingFixed!.BuildId == existingStructural!.BuildId)
             return (existingFixed.Chunks.Length, existingStructural.Chunks.Length, true);
 
         document = await DocumentAssetProcessing.ProcessAsync(document, existingStructural?.Assets ?? [], assetProcessor, cancellationToken);
+        document = await VisualIndexing.ProcessAsync(document, existingStructural?.Assets ?? [], visionClient, visionFamily, cancellationToken);
         var fixedChunks = new FixedWindowChunker(tokenizer).Split(document).ToArray();
         var parents = new StructuralChunker(tokenizer).Split(document).ToArray();
         var structuralChunks = new StructuralChunker(tokenizer, 650).Split(document).Select(child => child with

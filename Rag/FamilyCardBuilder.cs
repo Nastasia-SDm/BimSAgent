@@ -14,6 +14,13 @@ public static class FamilyIdentity
     public static bool Contains(string text, string name) => Regex.IsMatch(text,
         @"(?<![\p{L}\p{N}_№.+\-])" + Regex.Escape(name) + @"(?![\p{L}\p{N}_№+\-]|\.[\p{L}\p{N}])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    public static string[] HeadingNames(string text)
+    {
+        var parts = Regex.Split(text.Trim(), @"\s*/\s*|\s*;\s*");
+        var names = parts.Select(HeadingName).ToArray();
+        return names.Length > 0 && names.All(n => n != null)
+            ? names.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToArray() : [];
+    }
     public static string Id(string source, string name) => RagDefaults.Hash(source + "|family|" + name.ToUpperInvariant());
 }
 
@@ -30,7 +37,8 @@ public sealed class FamilyCardBuilder
         {
             var name = FamilyIdentity.HeadingName(text);
             // Parenthetical qualifiers can distinguish real variants; never merge colliding cards.
-            return name != null && collisions.Contains(name) ? text.Trim() : name;
+            return name != null && collisions.Contains(name) ? text.Trim() : name
+                ?? (FamilyIdentity.HeadingNames(text).Length > 1 ? text.Trim() : null);
         }
         foreach (var block in document.Blocks)
         {
@@ -60,14 +68,18 @@ public sealed class FamilyCardBuilder
             if (block.Kind.StartsWith("table-row", StringComparison.Ordinal) && block.FamilyNames.Length == 1
                 && registry.TryGetValue(block.FamilyNames[0], out var tableOwner))
             { localOwner = tableOwner; localName = block.FamilyNames[0]; }
-            var references = registry.Where(p => p.Value != localOwner && FamilyIdentity.Contains(block.Text, p.Key)).ToArray();
+            var members = localName == null ? [] : FamilyIdentity.HeadingNames(localName);
+            var references = registry.Where(p => p.Value != localOwner && !members.Contains(p.Key, StringComparer.OrdinalIgnoreCase)
+                && FamilyIdentity.Contains(block.Text, p.Key)).ToArray();
             var conflict = localOwner != null && references.Length > 0
                 && Regex.IsMatch(block.Text, @"^В этой статье.*(?:инструмент|семейств)", RegexOptions.IgnoreCase);
             blocks.Add(block with
             {
-                OwnerFamilyId = localOwner, FamilyNames = localName == null ? [] : [localName],
+                OwnerFamilyId = localOwner, FamilyNames = localName == null ? []
+                    : FamilyIdentity.HeadingNames(localName).Length > 1 ? FamilyIdentity.HeadingNames(localName) : [localName],
                 ReferencedFamilyIds = references.Select(p => p.Value).ToArray(),
-                Classification = conflict ? "ambiguous" : localOwner == null ? "general_article" : "family_content",
+                Classification = conflict ? "ambiguous" : localOwner == null ? "general_article"
+                    : members.Length > 1 ? "shared_family_content" : "family_content",
                 Warnings = conflict ? ["source_conflict: введение называет другое семейство"] : []
             });
         }
@@ -83,6 +95,7 @@ public sealed class FamilyCardBuilder
             return new FamilyCard(pair.Value, pair.Key, [], string.Join("\n", purpose), string.Join("\n", constraints),
                 owned.Select(b => b.Ordinal).ToArray(), warnings.Length == 0 ? "identified" : "conflict", warnings)
             {
+                MemberNames = FamilyIdentity.HeadingNames(pair.Key).Length > 1 ? FamilyIdentity.HeadingNames(pair.Key) : [],
                 AssetIds = owned.SelectMany(b => b.AssetIds).Distinct().ToArray(),
                 ReferencedFamilyIds = owned.SelectMany(b => b.ReferencedFamilyIds).Distinct().ToArray()
             };

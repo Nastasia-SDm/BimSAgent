@@ -9,7 +9,7 @@ public static class QuestionParser
     public static IReadOnlyList<string> Split(string text)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
-        var markers = Regex.Matches(text, @"(?:^|(?<=[?!])\s*)([1-9][0-9]*)\.\s*");
+        var markers = Regex.Matches(text, @"(?:^\s*|(?<=[?!])\s*)([1-9][0-9]*)\.\s*");
         if (markers.Count < 2 || !string.IsNullOrWhiteSpace(text[..markers[0].Index])) return [text];
         var questions = new List<string>();
         for (var i = 0; i < markers.Count; i++)

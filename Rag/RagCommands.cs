@@ -6,7 +6,7 @@ namespace BimSAgentApp.Rag;
 
 public static class RagCommands
 {
-   public const string Help = "rag index \"<docx>\" | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--baseline | --improved] [--top-k <максимум>] [--retrieval-only] [--json | --verbose]";
+   public const string Help = "rag index \"<docx>\" [--vision [--family <точное имя>]] | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--baseline | --improved] [--top-k <максимум>] [--retrieval-only] [--json | --verbose] | " + RagChatCommands.Help;
 
     public static string[] Split(string line)
     {
@@ -30,7 +30,7 @@ public static class RagCommands
 
     public static async Task<int> RunAsync(string[] args, CancellationToken cancellationToken,
         TextWriter? output = null, TextWriter? error = null, string? dataDirectory = null,
-        IEmbeddingClient? embeddingClient = null, IRagAnswerGenerator? answerGenerator = null)
+        IEmbeddingClient? embeddingClient = null, IRagAnswerGenerator? answerGenerator = null, int? activeTaskId = null)
     {
         output ??= Console.Out;
         error ??= Console.Error;
@@ -38,6 +38,9 @@ public static class RagCommands
         {
             if (args.Length < 2 || !args[0].Equals("rag", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException(Help);
             var command = args[1].ToLowerInvariant();
+            if (command == "chat")
+                return await RagChatCommands.RunAsync(args, cancellationToken, output: output, error: error,
+                    dataDirectory: dataDirectory, activeTaskId: activeTaskId);
             if (command is "help" or "--help") { await output.WriteLineAsync(Help); return 0; }
             var store = new JsonIndexStore(dataDirectory ?? RagDefaults.DataDirectory);
             if (command == "status")
@@ -64,11 +67,15 @@ public static class RagCommands
             var retrievalOnly = false;
             var baseline = false;
             var improved = false;
+            var vision = false;
+            string? visionFamily = null;
             int? topK = null;
             for (var i = 3; i < args.Length; i++)
             {
                 switch (args[i])
                 {
+                    case "--vision" when command == "index": vision = true; break;
+                    case "--family" when command == "index" && i + 1 < args.Length: visionFamily = args[++i]; break;
                     case "--strategy" when command == "ask" && i + 1 < args.Length:
                         strategyOption = args[++i]; strategySpecified = true; RagDefaults.ValidateStrategy(strategyOption); break;
                     case "--no-rag" when command == "ask": noRag = true; break;
@@ -99,6 +106,7 @@ public static class RagCommands
             var tokenizer = new RagTokenizer();
             if (command == "index")
             {
+                if (visionFamily != null && !vision) throw new ArgumentException("--family требует --vision.");
                 IDocumentAssetProcessor? processor = null;
                 var assetUrl = Environment.GetEnvironmentVariable("BIMS_ASSET_URL");
                 using var assetHttp = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false,
@@ -106,23 +114,13 @@ public static class RagCommands
                 if (!string.IsNullOrWhiteSpace(assetUrl)) processor = new HttpDocumentAssetProcessor(assetHttp, new Uri(assetUrl),
                     Environment.GetEnvironmentVariable("BIMS_ASSET_VERSION") ?? throw new ArgumentException("Задайте BIMS_ASSET_VERSION."),
                     Environment.GetEnvironmentVariable("BIMS_ASSET_API_KEY"));
-                var indexing = new IndexingService(new(), tokenizer, embeddings, store, processor);
+                var indexing = new IndexingService(new(), tokenizer, embeddings, store, processor, vision ? api : null, visionFamily);
                 var counts = await indexing.IndexAsync(args[2], cancellationToken);
                 await output.WriteLineAsync($"{(counts.Unchanged ? "Документ не изменился" : "Индексация завершена")}: fixed={counts.Fixed}, structural={counts.Structural}.");
                 return 0;
             }
-            IReranker reranker = new Bm25Reranker();
-            var rerankEndpoint = Environment.GetEnvironmentVariable("BIMS_RERANK_URL");
-            using var rerankHttp = new HttpClient(new HttpClientHandler
-            { AllowAutoRedirect = false, UseProxy = !(Uri.TryCreate(rerankEndpoint, UriKind.Absolute, out var rerankUri) && rerankUri.IsLoopback) })
-            { Timeout = TimeSpan.FromMinutes(5) };
-            if (!string.IsNullOrWhiteSpace(rerankEndpoint))
-                reranker = new SemanticReranker(rerankHttp, new Uri(rerankEndpoint),
-                    Environment.GetEnvironmentVariable("BIMS_RERANK_MODEL") ?? "BAAI/bge-reranker-v2-m3",
-                    Environment.GetEnvironmentVariable("BIMS_RERANK_API_KEY"));
-            IRetriever retriever = baseline
-     ? new CosineRetriever()
-     : new HybridRetriever(reranker);
+            using var rerankHttp = RagRetrievalFactory.CreateHttpClient();
+            IRetriever retriever = RagRetrievalFactory.Create(rerankHttp, baseline);
 
             var service = new RagService(
                 embeddings,
@@ -172,7 +170,7 @@ public static class RagCommands
         }
     }
 
-    private static async Task WriteVerboseAsync(TextWriter output, RagAnswer answer)
+    internal static async Task WriteVerboseAsync(TextWriter output, RagAnswer answer)
     {
         if (answer.NoRag)
             await output.WriteLineAsync("NO-RAG: поиск чанков не выполнялся.");

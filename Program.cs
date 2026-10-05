@@ -66,7 +66,7 @@ while (!shutdown.IsCancellationRequested)
     {
         if (input.TrimStart().Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries)[0].Equals("rag", StringComparison.OrdinalIgnoreCase))
         {
-            try { await RagCommands.RunAsync(RagCommands.Split(input), shutdown.Token); }
+            try { await RagCommands.RunAsync(RagCommands.Split(input), shutdown.Token, activeTaskId: agent.ActiveTaskId); }
             catch (ArgumentException e) { Console.Error.WriteLine(e.Message); }
             continue;
         }

@@ -7,7 +7,7 @@ public static class RagDefaults
 {
     public const string EmbeddingModel = "text-embedding-3-small";
     public const int Dimensions = 1536;
-    public const string AnswerModel = "gpt-5.4-mini";
+    public const string AnswerModel = "gpt-6.1-sol";
     public const string DataDirectory = @"D:\BIM-S_TestArtifacts\rag-data";
     public const string Unknown = "Не знаю. Для корректного ответа нужны дополнительные данные.";
     public static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
@@ -43,11 +43,15 @@ public sealed record DocumentAsset(string AssetId, string RelationshipId, string
     public string Caption { get; init; } = "";
     public string OcrText { get; init; } = "";
     public string VisionText { get; init; } = "";
+    public string VisionVersion { get; init; } = "";
+    public string VisionStatus { get; init; } = "unprocessed";
     public string ProcessorVersion { get; init; } = "unconfigured";
 }
 public sealed record FamilyCard(string FamilyId, string CanonicalName, string[] Aliases,
     string Purpose, string Constraints, int[] BlockOrdinals, string Status, string[] Warnings)
 {
+    // A shared article is not a claim that its distinct family variants are aliases.
+    public string[] MemberNames { get; init; } = [];
     public string[] AssetIds { get; init; } = [];
     public string[] ReferencedFamilyIds { get; init; } = [];
 }
@@ -81,6 +85,7 @@ public sealed record RagChunk(string Source, string Title, string File, string S
     public TableContext[] Tables { get; init; } = [];
     public DocumentBlock[] InheritedContext { get; init; } = [];
     public string[] FamilyWarnings { get; init; } = [];
+    public string[] VisualEvidence { get; init; } = [];
 }
 public sealed record TableContext(string TableId, string[] Headers, string HeaderBlockId, bool InferredFromFirstRow);
 public sealed record EvidenceSpan(string BlockId, string? OwnerFamilyId, int Start, int End, int SourceStart, int SourceEnd);
@@ -118,7 +123,10 @@ public sealed record RagQuestionContext(string Question, IReadOnlyList<Retrieval
     public int ScannedCount { get; init; }
 }
 public sealed record RagAnswerRequest(string Question, IReadOnlyList<RetrievalHit> Context,
-    bool NoRag, AnswerOptions Options, IReadOnlyList<RagQuestionContext>? Questions = null);
+    bool NoRag, AnswerOptions Options, IReadOnlyList<RagQuestionContext>? Questions = null)
+{
+    public RagChatContext? Chat { get; init; }
+}
 public sealed record RagAnswer(string Text, IReadOnlyList<RetrievalHit> Sources, bool NoRag)
 {
     // Expanded candidates with final Selected flags, grouped by question.

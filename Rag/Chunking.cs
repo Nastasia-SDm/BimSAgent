@@ -92,6 +92,8 @@ public abstract class ChunkerBase(RagTokenizer tokenizer, int size = 600, int ov
                 EmbeddingInputHash = RagDefaults.Hash(embeddingInput),
                 Warnings = covered.SelectMany(b => b.Warnings).Distinct().ToArray(),
                 AssetIds = covered.SelectMany(b => b.AssetIds).Distinct().ToArray(),
+                VisualEvidence = offsets.Where(b => b.Block.Kind == "vision_interpretation" && b.Start < end && b.End > start)
+                    .Select(b => text[Math.Max(b.Start, start)..Math.Min(b.End, end)]).ToArray(),
                 Spans = offsets.Where(b => b.Start < end && b.End > start).Select(b => new EvidenceSpan(b.Block.BlockId,
                     b.Block.OwnerFamilyId, Math.Max(b.Start, start) - start, Math.Min(b.End, end) - start,
                     Math.Max(start - b.Start, 0), Math.Min(end, b.End) - b.Start)).ToArray()
@@ -119,6 +121,7 @@ public sealed class StructuralChunker(RagTokenizer tokenizer, int size = 2000, i
         {
             // Collect the entire family before splitting: subheadings and table rows are not boundaries.
             var boundary = group.Count > 0 && (!block.FamilyNames.SequenceEqual(group[0].FamilyNames)
+                || block.Kind == "vision_interpretation" || group[0].Kind == "vision_interpretation"
                 || (block.FamilyNames.Length == 0 && (block.Kind == "heading" || block.Section != group[0].Section))
                 || (block.Kind == "heading" && block.FamilyNames.Contains(block.Text, StringComparer.Ordinal)));
             if (boundary) { result.AddRange(PackBlocks(document, group)); group.Clear(); }

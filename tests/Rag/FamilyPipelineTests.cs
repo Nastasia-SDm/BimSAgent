@@ -39,6 +39,13 @@ static class FamilyPipelineTests
         check(fallback.All(h => h.RerankerMode == "lexical_fallback:reranker_unavailable"), "unavailable semantic service explicitly reports fallback");
         var budgeted = new ContextAssembler(new()).Assemble(new(hits, 1), 0);
         check(budgeted.Candidates[0] is { Selected: false, SelectionReason: "token_budget" }, "budget exclusion is traceable");
+        var manySpans = Enumerable.Range(0, 100).Select(i => new EvidenceSpan(new string('a', 64), new string('b', 64), i, i + 1, 0, 1)).ToArray();
+        var compact = hits[0].Chunk with { Text = "Описание семейства", Spans = manySpans };
+        var twoFamilies = new ContextAssembler(new()).Assemble(new([
+            new(compact with { OwnerFamilyId = "family-a" }, 0.8),
+            new(compact with { ChunkId = "other", OwnerFamilyId = "family-b" }, 0.7)], 2), 2000);
+        check(twoFamilies.Candidates.All(h => h.Selected) && twoFamilies.Candidates.All(h => h.Chunk.Spans.Length == 100),
+            "ownership metadata does not evict a second family and remains available in chunks");
     }
     private sealed class ScoresHandler(bool fail = false) : HttpMessageHandler
     {

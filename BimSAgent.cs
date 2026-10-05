@@ -86,6 +86,10 @@ public sealed class BimSAgent : IDisposable
         string[]? Plan = null, int StepIndex = 0, string[]? Results = null,
         bool AwaitingChoice = false, string PendingInput = "");
     private int? _activeTaskId;
+    public int? ActiveTaskId => _activeTaskId;
+
+    // Read-only adapter: RAG uses the same validation and persisted task as the main agent.
+    public static JsonElement ReadTaskContext(int id) => JsonSerializer.SerializeToElement(ReadTask(id), MemoryJson);
 
     public BimSAgent(string? profilesDirectory = null)
     {

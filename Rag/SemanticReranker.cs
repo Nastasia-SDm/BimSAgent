@@ -15,8 +15,13 @@ public sealed class SemanticReranker(HttpClient http, Uri endpoint, string model
     {
         if (candidates.Count == 0) return [];
         var tokenizer = new RagTokenizer();
-        var passages = candidates.SelectMany((hit, index) => tokenizer.Windows(hit.Chunk.EmbeddingInput, 350, 60)
-            .Select(w => (Index: index, Text: hit.Chunk.EmbeddingInput[w.Start..w.End]))).ToArray();
+        var passages = candidates.SelectMany((hit, index) =>
+        {
+            var heading = string.Join("; ", hit.Chunk.FamilyNames) + "\n" + hit.Chunk.Section;
+            // Score source passages, not repeated purpose text injected into every embedding input.
+            return tokenizer.Windows(hit.Chunk.Text, 300, 50)
+                .Select(w => (Index: index, Text: heading + "\n" + hit.Chunk.Text[w.Start..w.End]));
+        }).ToArray();
         try
         {
             var scores = new double[passages.Length];

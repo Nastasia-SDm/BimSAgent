@@ -75,6 +75,10 @@ Check(first.BuildId == second.BuildId && first.Chunks.All(c => c.Embedding.Lengt
 Check(File.ReadAllText(Path.Combine(directory, "fixed.json")).Contains("chunk_id"), "snake_case metadata persisted");
 var embeddingCalls = embedder.Calls;
 Check((await indexing.IndexAsync(fixture, default)).Unchanged && embedder.Calls == embeddingCalls, "unchanged document makes no embedding calls");
+await store.SavePairAsync(first, second with { Assets = [new("failed", "rId1", "word/document.xml", "/p[1]", "word/media/missing.png", "hash", "processing_failed")] }, default);
+var retryIndexing = new IndexingService(extractor, tokenizer, embedder, store, new RetryAssetProcessor());
+Check(!(await retryIndexing.IndexAsync(fixture, default)).Unchanged && embedder.Calls == embeddingCalls,
+    "unchanged document retries failed assets while reusing embeddings");
 
 var synthetic = first with { Chunks = new[]
 {
@@ -164,7 +168,9 @@ var ragPayload = handler.Payloads[1];
 var baseline = handler.Payloads[2];
 Check(ragPayload.GetProperty("model").GetString() == RagDefaults.AnswerModel
     && baseline.GetProperty("model").GetString() == RagDefaults.AnswerModel
-    && ragPayload.GetProperty("temperature").GetDouble() == baseline.GetProperty("temperature").GetDouble()
+    && !ragPayload.TryGetProperty("temperature", out _) && !baseline.TryGetProperty("temperature", out _)
+    && ragPayload.GetProperty("reasoning").GetProperty("effort").GetString() == "low"
+    && baseline.GetProperty("reasoning").GetProperty("effort").GetString() == "low"
     && ragPayload.GetProperty("max_output_tokens").GetInt32() == baseline.GetProperty("max_output_tokens").GetInt32(), "HTTP same generation settings");
 using var baselineInput = JsonDocument.Parse(baseline.GetProperty("input").GetString()!);
 Check(baselineInput.RootElement.GetProperty("fragments").GetArrayLength() == 0, "HTTP NO-RAG sends no fragments");
@@ -173,8 +179,12 @@ handler.Fail = true;
 await Throws(() => api.EmbedAsync(["test"], default), "HTTP authentication error handled");
 
 await MultiQuestionTests.Run(Check, store, tokenizer);
+await RagChatTests.Run(Check, store, root);
+AnswerEvidenceTests.Run(Check, store.Load("structural")!);
 await RetrievalQualityTests.Run(Check, store.Load("structural")!, tokenizer, fixture, root);
 await FamilyPipelineTests.Run(Check, store.Load("structural")!);
+await VisualTests.Run(Check, root);
+if (args.Length > 1) ContextReplayTests.Run(Check, args[1]);
 
 Check(await Command("rag", "ask", "площадка", "--strategy", "structural") == 0, "verbose baseline ask");
 var ordinaryOutput = output.ToString();
