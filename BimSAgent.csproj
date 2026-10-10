@@ -12,6 +12,7 @@
     <None Update="invariants.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="D:\BIM-S-MCP-4\Core\BimS.Family.Core.csproj" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="DocumentFormat.OpenXml" Version="3.5.1" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />

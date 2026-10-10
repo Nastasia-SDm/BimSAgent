@@ -7,6 +7,17 @@ namespace BimSAgentApp;
 public sealed class BimSAgent : IDisposable
 {
     public const string Model = "gpt-4.1-nano";
+    private readonly bool _useOllama = ReadProvider();
+    public string LlmDescription => _useOllama ? "Ollama / qwen3:8b" : $"OpenAI / {Model}";
+
+    private static bool ReadProvider() => Environment.GetEnvironmentVariable("BIMS_LLM_PROVIDER")?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "openai" => false,
+        "ollama" => true,
+        _ => throw new InvalidOperationException("BIMS_LLM_PROVIDER: допустимы openai и ollama.")
+    };
+
+    private string CompletionKey() => _useOllama ? "" : Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
     public sealed record TokenStatistics(int? UserInput, int? HistoryInput, int? TotalInput, int? Output);
     public TokenStatistics? LastTokenStatistics { get; private set; }
     public bool LastResponseUsedMcp { get; private set; }
@@ -93,6 +104,14 @@ public sealed class BimSAgent : IDisposable
 
     public BimSAgent(string? profilesDirectory = null)
     {
+        if (_useOllama)
+        {
+            _httpClient.Dispose();
+            _httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
+            {
+               Timeout = TimeSpan.FromMinutes(10)
+            };
+        }
         _profilesDirectory = Path.GetFullPath(profilesDirectory ?? @"C:\Users\Anastasia\OneDrive\Desktop\BimSAgent\profiles");
         try
         {
@@ -217,7 +236,7 @@ public sealed class BimSAgent : IDisposable
             "additionalProperties":false,
             "required":["server","tool","argumentsJson"],
             "properties":{
-              "server":{"type":"string","enum":["mcp1","mcp2","mcp3"]},
+              "server":{"type":"string","enum":["mcp1","mcp2","mcp3","mcp4","mcp5","mcp6"]},
               "tool":{"type":"string"},
               "argumentsJson":{"type":"string"}
             }
@@ -231,8 +250,8 @@ public sealed class BimSAgent : IDisposable
     string userQuestion,
     CancellationToken cancellationToken)
     {
-        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        if (string.IsNullOrWhiteSpace(apiKey))
+        var apiKey = CompletionKey();
+        if (!_useOllama && string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException(
                 "Задайте переменную окружения OPENAI_API_KEY.");
 
@@ -244,6 +263,12 @@ public sealed class BimSAgent : IDisposable
             ["model"] = Model,
             ["instructions"] = """
 Ты MCP-планировщик. Построй один полный план до выполнения инструментов.
+MCP4–MCP6 относятся к библиотеке семейств, а не к изменениям текущей модели.
+Они запускают длительные задания и возвращают runId; статус проверяется отдельным вызовом.
+Не выдумывай пути JSON или runId и не планируй зависимый этап до получения результата предыдущего.
+Для полной цепочки библиотеки предложи явную команду family pipeline --synthetic,
+family pipeline --empty или, только по явной просьбе прочитать библиотеку, family pipeline --library.
+По умолчанию библиотеку RVT не читай. Для отдельных этапов используй только явно заданные JSON.
 Если для ответа нужны данные модели, которые доступны через агрегирующий MCP1 get-model,
 используй только MCP1 get-model.
 
@@ -363,7 +388,7 @@ argumentsJson — строка с JSON-объектом по inputSchema выб�
                     x => x.Name,
                     x => (object?)x.Value.Clone());
 
-            if (step.Server is not ("mcp1" or "mcp2" or "mcp3") ||
+            if (step.Server is not ("mcp1" or "mcp2" or "mcp3" or "mcp4" or "mcp5" or "mcp6") ||
                 string.IsNullOrWhiteSpace(step.Tool))
                 throw new InvalidOperationException("Некорректный MCP-шаг.");
             return (step.Server, step.Tool, Arguments: arguments);
@@ -496,8 +521,8 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
         LastTokenStatistics = null;
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
 
-        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        if (string.IsNullOrWhiteSpace(apiKey))
+        var apiKey = CompletionKey();
+        if (!_useOllama && string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("Задайте переменную окружения OPENAI_API_KEY перед отправкой запроса.");
 
         var invariantRules = memoryOnly ? "" : LoadInvariants();
@@ -552,7 +577,7 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
             .Append(new Message("assistant", answer))
             .Select(message => message with
             {
-                Content = message.Content.Replace(apiKey.Trim(), "[скрыто]", StringComparison.Ordinal)
+                Content = HideKey(message.Content)
             }).ToList();
         SaveHistory(updatedHistory);
         _history = updatedHistory;
@@ -572,6 +597,8 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
 
     private async Task<(string Answer, TokenStatistics Statistics)> RequestCompletionAsync(Dictionary<string, object> payload, string apiKey, CancellationToken cancellationToken)
     {
+        if (_useOllama)
+            return await RequestOllamaAsync(payload, cancellationToken);
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses");
         // The key is used only for authentication and is never written to disk or logs.
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
@@ -675,6 +702,51 @@ if (root.TryGetProperty("usage", out var errorUsage) &&
             hasUsage && usage.TryGetProperty("input_tokens", out var inputTokens) ? inputTokens.GetInt32() : null,
             hasUsage && usage.TryGetProperty("output_tokens", out var outputTokens) ? outputTokens.GetInt32() : null);
         return (answer, statistics);
+    }
+
+    // Translate the existing generation contract, including structured auxiliary operations,
+    // to native Ollama chat. No cloud fallback is allowed on this path.
+    private async Task<(string Answer, TokenStatistics Statistics)> RequestOllamaAsync(
+        Dictionary<string, object> payload, CancellationToken cancellationToken)
+    {
+        var source = JsonSerializer.SerializeToElement(payload);
+        var messages = new List<object>();
+        if (source.TryGetProperty("instructions", out var instructions))
+            messages.Add(new { role = "system", content = instructions.GetString() });
+        var input = source.GetProperty("input");
+        if (input.ValueKind == JsonValueKind.String)
+            messages.Add(new { role = "user", content = input.GetString() });
+        else
+            foreach (var message in input.EnumerateArray()) messages.Add(message.Clone());
+        var options = new Dictionary<string, object>();
+        if (source.TryGetProperty("temperature", out var temperature)) options["temperature"] = temperature;
+        if (source.TryGetProperty("max_output_tokens", out var limit)) options["num_predict"] = limit;
+        var body = new Dictionary<string, object>
+        {
+            ["model"] = "qwen3:8b", ["messages"] = messages,
+            ["stream"] = false, ["think"] = false, ["options"] = options
+        };
+        if (source.TryGetProperty("text", out var text) && text.TryGetProperty("format", out var format))
+            body["format"] = format.TryGetProperty("schema", out var schema) ? (object)schema.Clone() : "json";
+        using var request = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:11434/api/chat")
+        {
+            Content = JsonContent.Create(body)
+        };
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Ollama вернул HTTP {(int)response.StatusCode}. Проверьте сервер и модель qwen3:8b.");
+        using var json = await JsonDocument.ParseAsync(
+            await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+        var root = json.RootElement;
+        if (!root.TryGetProperty("done", out var done) || done.ValueKind != JsonValueKind.True)
+            throw new InvalidOperationException("Ollama не завершил ответ.");
+        if (root.TryGetProperty("done_reason", out var reason) && reason.GetString() == "length")
+            throw new InvalidOperationException("Ollama: лимит max_output_tokens исчерпан. Файл не изменён.");
+        var answer = root.GetProperty("message").GetProperty("content").GetString();
+        if (string.IsNullOrWhiteSpace(answer)) throw new InvalidOperationException("Ollama не вернул текстовый ответ.");
+        return (HideKey(answer), new TokenStatistics(null, null,
+            root.TryGetProperty("prompt_eval_count", out var promptCount) ? promptCount.GetInt32() : null,
+            root.TryGetProperty("eval_count", out var outputCount) ? outputCount.GetInt32() : null));
     }
 
     private sealed record Invariant(int Id, string Rule);
@@ -804,8 +876,8 @@ if (root.TryGetProperty("usage", out var errorUsage) &&
         var entries = new List<MemoryEntry>(_memory.ShortTerm)
         {
             new(Guid.NewGuid().ToString("D"), MemoryScope,
-                content.Replace(apiKey.Trim(), "[скрыто]", StringComparison.Ordinal), null, null, Role: role,
-                Description: DescribeLocally(content.Replace(apiKey.Trim(), "[скрыто]", StringComparison.Ordinal), role))
+                HideKey(content), null, null, Role: role,
+                Description: DescribeLocally(HideKey(content), role))
         };
         WriteMemoryJson(MemoryPath("short-term-memory.json"), entries);
         _memory = _memory with { ShortTerm = entries };
@@ -871,8 +943,8 @@ var uniqueForOptimization = originals
     var path = MemoryPath("long-term-memory.json");
     var fileBefore = File.Exists(path) ? File.ReadAllText(path) : null;
 
-    var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-    if (string.IsNullOrWhiteSpace(apiKey))
+    var apiKey = CompletionKey();
+    if (!_useOllama && string.IsNullOrWhiteSpace(apiKey))
         throw new InvalidOperationException("Задайте OPENAI_API_KEY.");
 
     var result = await RequestCompletionAsync(new Dictionary<string, object>
@@ -1537,8 +1609,8 @@ var uniqueForOptimization = originals
             (task.State is "EXECUTION" or "VALIDATION" && choice == 2)))
             throw new InvalidOperationException("Проверка текста доступна только после выбора корректировок.");
         ArgumentException.ThrowIfNullOrWhiteSpace(corrections);
-        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        if (string.IsNullOrWhiteSpace(apiKey)) throw new InvalidOperationException("Задайте OPENAI_API_KEY.");
+        var apiKey = CompletionKey();
+        if (!_useOllama && string.IsNullOrWhiteSpace(apiKey)) throw new InvalidOperationException("Задайте OPENAI_API_KEY.");
         // Read-only classification: no SendAsync, memory updates, task writes or state changes.
         var result = await RequestCompletionAsync(new Dictionary<string, object>
         {
@@ -1771,6 +1843,7 @@ var uniqueForOptimization = originals
 
     private async Task<int?> TryCountTokensAsync(Message[] input, string apiKey, CancellationToken cancellationToken)
     {
+        if (_useOllama) return null; // OpenAI token counts do not apply to the local model.
         try
         {
             return await CountTokensAsync(input, apiKey, null, cancellationToken);
@@ -1811,9 +1884,10 @@ var uniqueForOptimization = originals
     public async Task<string> RunContextLimitTestAsync(int maxOutputTokens, double temperature, CancellationToken cancellationToken = default)
     {
         ValidateGenerationOptions(maxOutputTokens, temperature);
+        if (_useOllama) throw new InvalidOperationException("context-limit-test доступен только при BIMS_LLM_PROVIDER=openai.");
         const int targetTokens = 1_050_000;
-        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        if (string.IsNullOrWhiteSpace(apiKey))
+        var apiKey = CompletionKey();
+        if (!_useOllama && string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException("Задайте переменную окружения OPENAI_API_KEY перед тестом.");
 
         // Repeated text is just a starting point; the API verifies the actual count,

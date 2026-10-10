@@ -12,6 +12,8 @@ var testRoot = Path.Combine(@"D:\BIM-S_TestArtifacts", "BimSAgent", "runs", Guid
 Directory.CreateDirectory(testRoot);
 Environment.CurrentDirectory = testRoot;
 Environment.SetEnvironmentVariable("OPENAI_API_KEY", "test-key-no-network");
+var originalProvider = Environment.GetEnvironmentVariable("BIMS_LLM_PROVIDER");
+Environment.SetEnvironmentVariable("BIMS_LLM_PROVIDER", "openai");
 var passed = 0;
 void Check(bool condition, string name)
 {
@@ -22,6 +24,7 @@ void Check(bool condition, string name)
 
 try
 {
+    await LlmProviderTests.Run(Check, testRoot);
     ContextTests.Run(Check, testRoot);
     using var agent = new BimSAgent(Path.Combine(testRoot, "profiles"));
     var fake = new FakeHttp();
@@ -84,7 +87,11 @@ try
     Check(!File.ReadAllText(Path.Combine(testRoot, "history.json")).Contains("MCP результаты"), "MCP context is not persisted in dialogue history");
     Console.WriteLine($"{passed} checks passed. No live LLM or Revit calls.");
 }
-finally { Environment.CurrentDirectory = originalDirectory; }
+finally
+{
+    Environment.CurrentDirectory = originalDirectory;
+    Environment.SetEnvironmentVariable("BIMS_LLM_PROVIDER", originalProvider);
+}
 
 static string Plan(string[] tools, bool badArguments = false) => JsonSerializer.Serialize(new
 {
@@ -108,11 +115,16 @@ sealed class FakeHttp : HttpMessageHandler
     public string LastInstructions { get; private set; } = "";
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
     {
+        if (request.RequestUri!.Host != "api.openai.com" || request.RequestUri.Scheme != "https" ||
+            request.Headers.Authorization?.Scheme != "Bearer" || request.Headers.Authorization.Parameter != "test-key-no-network")
+            throw new Exception("Cloud must retain authenticated OpenAI HTTPS requests.");
         if (request.RequestUri!.AbsolutePath.EndsWith("/input_tokens")) return Json(new { input_tokens = 10 });
         if (request.RequestUri.AbsolutePath != "/v1/responses") throw new Exception("Unexpected HTTP request.");
         Completions++;
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
         var root = body.RootElement;
+        if (root.GetProperty("model").GetString() != BimSAgent.Model)
+            throw new Exception("Cloud generation model changed.");
         var name = root.TryGetProperty("text", out var text) && text.GetProperty("format").TryGetProperty("name", out var n)
             ? n.GetString() : null;
         var answer = name switch

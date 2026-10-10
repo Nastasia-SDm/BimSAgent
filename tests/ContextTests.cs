@@ -7,6 +7,14 @@ static class ContextTests
 {
     public static void Run(Action<bool, string> check, string output)
     {
+        var passportCall = PassportCommand.Parse("v001 \"Паспорт вентилятора 123.pdf\"");
+        check(passportCall.Version == "V001" && passportCall.FileName == "Паспорт вентилятора 123.pdf", "passport short command preserves quoted Unicode filename");
+        foreach (var invalid in new[] { "V001 паспорт.pdf", "V001 \"D:\\BIM-база ОВ\\паспорт.pdf\"", "V001 \"../паспорт.pdf\"", "V001 \"a.pdf\" extra", "V001 \"a.txt\"" })
+        {
+            var rejected = false;
+            try { PassportCommand.Parse(invalid); } catch (ArgumentException) { rejected = true; }
+            check(rejected, "passport command rejects malformed or path argument");
+        }
         var model = Snapshot(false); var documentation = Snapshot(true);
         var comparisonData = JsonNode.Parse("""
             {"status":"complete","version1":"V003","version2":"V007","jsonPath":"report.json",
@@ -18,6 +26,10 @@ static class ContextTests
             """)!.AsObject();
         McpCommands.ToolResult Compare(JsonObject data, bool error = false) => new("mcp3", "compare-model-versions", error, "text not for final", data.ToJsonString());
         var comparison = Compare(comparisonData);
+        var familyStatus = McpFinalContext.Build([new McpCommands.ToolResult("mcp6", "get-unification-status", false,
+            "not forwarded", "{\"runId\":\"synthetic\",\"stage\":6,\"status\":\"partial\",\"resultPath\":\"result.json\",\"htmlPath\":\"report.html\",\"rawFamilies\":\"must be omitted\"}")], "семейства");
+        check(familyStatus.Text.Contains("report.html") && familyStatus.Text.Contains("synthetic") && !familyStatus.Text.Contains("rawFamilies"),
+            "family jobs expose compact status and report paths without library payload");
         var cases = new (string Name, McpCommands.ToolResult[] Results)[]
         {
             ("MCP1 -> MCP3", [model, comparison]),

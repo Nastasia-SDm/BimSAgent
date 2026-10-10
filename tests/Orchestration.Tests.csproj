@@ -10,6 +10,7 @@
     <!-- Same orchestration implementation, deterministic MCP/HTTP test doubles. -->
     <Compile Include="../BimSAgent.cs" Link="BimSAgent.cs" />
     <Compile Include="../McpFinalContext.cs" Link="McpFinalContext.cs" />
+    <Compile Include="../PassportCommand.cs" Link="PassportCommand.cs" />
     <None Include="../invariants.json" Link="invariants.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

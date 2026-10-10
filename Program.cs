@@ -13,6 +13,11 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 // Experimental commands must not construct the stateful dialogue agent.
+if (args.Length > 0 && args[0].Equals("family", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = await FamilyLibraryCommands.RunAsync(args, shutdown.Token);
+    return;
+}
 if (args.Length > 0 && args[0].Equals("rag", StringComparison.OrdinalIgnoreCase))
 {
     Environment.ExitCode = await RagCommands.RunAsync(args, shutdown.Token);
@@ -31,9 +36,10 @@ catch (InvalidOperationException e)
     return;
 }
 using var agent = loadedAgent;
+Console.WriteLine($"LLM: {agent.LlmDescription}");
 Console.WriteLine("BimSAgent — помощник по Revit, BIM и Revit API.");
 Console.WriteLine("Введите запрос. Для выхода: /exit или Ctrl+C.");
-Console.WriteLine($"Модель: {BimSAgent.Model}. Тест лимита контекста: context-limit-test.");
+Console.WriteLine($"Модель: {agent.LlmDescription}. Тест лимита контекста: context-limit-test.");
 Console.WriteLine("Создать технический prompt по задаче: generate-prompt.");
 Console.WriteLine("strategy sliding-window|sticky-facts|branching; checkpoint; branch create <name>; branch switch <name>");
 Console.WriteLine(agent.ContextStatus);
@@ -43,6 +49,10 @@ Console.WriteLine("profile create <name>; profile use <name>; profile show; prof
 Console.WriteLine("task create <name>; task open <id>; task pause");
 Console.WriteLine("mcp1-tools / mcp2-tools / mcp3-tools — список инструментов MCP-сервера №1 / №2 / №3");
 Console.WriteLine("mcp1-call / mcp2-call / mcp3-call <tool-name> [JSON-аргументы] — вызов инструмента MCP-сервера №1 / №2 / №3");
+Console.WriteLine("mcp4-call extract-family-library — получить JSON библиотеки.");
+Console.WriteLine("mcp5-call compare-family-library V001 — сравнить JSON MCP4.");
+Console.WriteLine("mcp6-call recommend-family-unification V001 — получить рекомендации и HTML.");
+Console.WriteLine("mcp6-call recommend-family-from-passport V001 \"Имя паспорта.pdf\" — подобрать основу по PDF и получить отдельный HTML.");
 
 while (!shutdown.IsCancellationRequested)
 {
@@ -169,7 +179,7 @@ while (!shutdown.IsCancellationRequested)
     }
     catch (HttpRequestException)
     {
-        Console.Error.WriteLine("Не удалось связаться с OpenAI. Проверьте подключение к сети.");
+        Console.Error.WriteLine($"Не удалось связаться с {agent.LlmDescription}. Проверьте доступность сервера.");
     }
     catch (InvalidOperationException e)
     {
@@ -177,7 +187,7 @@ while (!shutdown.IsCancellationRequested)
     }
     catch (System.Text.Json.JsonException)
     {
-        Console.Error.WriteLine("OpenAI вернул ответ в неожиданном формате.");
+        Console.Error.WriteLine($"{agent.LlmDescription} вернул ответ в неожиданном формате.");
     }
     catch (Exception e) when (e is IOException or UnauthorizedAccessException)
     {
@@ -326,6 +336,18 @@ static async Task<string?> ReadUserInputAsync(CancellationToken cancellationToke
     while (true)
     {
         var input = await Console.In.ReadLineAsync(cancellationToken);
+        if (input != null && input.TrimStart().StartsWith("family ", StringComparison.OrdinalIgnoreCase))
+        {
+            await FamilyLibraryCommands.RunAsync(RagCommands.Split(input), cancellationToken);
+            Console.Write("Продолжите ввод: ");
+            continue;
+        }
+        if (input != null && new[] { "mcp4-", "mcp5-", "mcp6-" }.Any(p => input.TrimStart().StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+        {
+            await McpCommands.HandleAsync(input.Trim(), cancellationToken);
+            Console.Write("Продолжите ввод: ");
+            continue;
+        }
        if (input is null || !(input.TrimStart().StartsWith("mcp1-", StringComparison.OrdinalIgnoreCase) || input.TrimStart().StartsWith("mcp2-", StringComparison.OrdinalIgnoreCase) || input.TrimStart().StartsWith("mcp3-", StringComparison.OrdinalIgnoreCase) || input.TrimStart().StartsWith("mcp-", StringComparison.OrdinalIgnoreCase)))
             return input;
         await McpCommands.HandleAsync(input.Trim(), cancellationToken);

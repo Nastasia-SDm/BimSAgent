@@ -43,6 +43,8 @@ internal static class McpFinalContext
             }
             else if (r.Server == "mcp3" && r.Tool == "compare-model-versions" && data != null)
                 projection = Comparison(data);
+            else if (r.Server is "mcp4" or "mcp5" or "mcp6" && data != null)
+                projection = Pick(data, "runId", "stage", "status", "resultPath", "htmlPath", "error");
             else if (data?["snapshot"] is JsonObject snapshot)
                 projection = Current(data, snapshot, question);
             else

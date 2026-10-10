@@ -17,6 +17,9 @@ internal static class McpCommands
     private static readonly ServerState Server1 = new(@"D:\BIM-S-MCP-1\BIM-S_MCP-Server", "BIM-S_MCP-Server");
     private static readonly ServerState Server2 = new(@"D:\BIM-S-MCP-2\BIM-S_MCP-Server-2", "BIM-S_MCP-Server-2");
     private static readonly ServerState Server3 = new(@"D:\BIM-S-MCP-3\BIM-S_MCP-Server-3", "BIM-S_MCP-Server-3");
+    private static readonly ServerState Server4 = new(@"D:\BIM-S-MCP-4", "BimS.Mcp4");
+    private static readonly ServerState Server5 = new(@"D:\BIM-S-MCP-5", "BimS.Mcp5");
+    private static readonly ServerState Server6 = new(@"D:\BIM-S-MCP-6", "BimS.Mcp6");
     public sealed record ToolInfo(
     string Server,
     string Name,
@@ -35,6 +38,9 @@ internal static class McpCommands
         "mcp1" => Server1,
         "mcp2" => Server2,
         "mcp3" => Server3,
+        "mcp4" => Server4,
+        "mcp5" => Server5,
+        "mcp6" => Server6,
         _ => throw new ArgumentException("Неизвестный MCP-сервер.", nameof(server))
     };
 
@@ -44,6 +50,9 @@ internal static class McpCommands
 
         foreach (var name in new[] { "PATH", "SystemRoot", "TEMP", "TMP", "DOTNET_ROOT", "ProgramFiles" })
             environment[name] = Environment.GetEnvironmentVariable(name);
+        if (server == Server6)
+            foreach (var name in new[] { "BIMS_FAMILY_LLM_ENDPOINT", "BIMS_FAMILY_LLM_KEY", "BIMS_FAMILY_LLM_MODEL", "BIMS_FAMILY_LLM_INPUT_RATE", "BIMS_FAMILY_LLM_OUTPUT_RATE", "BIMS_FAMILY_LLM_VISION" })
+                environment[name] = Environment.GetEnvironmentVariable(name);
 
         return new StdioClientTransport(new StdioClientTransportOptions
         {
@@ -73,9 +82,15 @@ internal static class McpCommands
         {
         (Name: "mcp1", Server: Server1),
         (Name: "mcp2", Server: Server2),
-        (Name: "mcp3", Server: Server3)
+        (Name: "mcp3", Server: Server3),
+        (Name: "mcp4", Server: Server4),
+        (Name: "mcp5", Server: Server5),
+        (Name: "mcp6", Server: Server6)
     })
         {
+            if (item.Name is "mcp4" or "mcp5" or "mcp6" &&
+                !File.Exists(Path.Combine(item.Server.Directory, "bin", "Debug", "net10.0", item.Server.AssemblyName + ".dll")))
+                continue;
             using var timeout =
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
@@ -144,9 +159,301 @@ internal static class McpCommands
             text,
             result.StructuredContent?.ToString());
     }
+    private sealed record FamilyJob(
+    string RunId,
+    string Status,
+    string? ResultPath,
+    string? HtmlPath,
+    string? Error);
+
+    private static string FamilyReportRoot(int stage) => stage switch
+    {
+        4 => @"D:\BIM-S-MCP-4_Отчеты_Семейства",
+        5 => @"D:\BIM-S-MCP-5_Отчеты_Сравнение",
+        6 => @"D:\BIM-S-MCP-6_Отчеты_Результат сравнения",
+        _ => throw new ArgumentOutOfRangeException(nameof(stage))
+    };
+
+    private static string NormalizeFamilyVersion(string value)
+    {
+        value = value.Trim();
+
+        if (Regex.IsMatch(value, @"^V\d{3,}$", RegexOptions.IgnoreCase))
+            return value.ToUpperInvariant();
+
+        if (int.TryParse(value, out var number) && number > 0)
+            return $"V{number:000}";
+
+        throw new ArgumentException("Номер JSON должен быть, например, V001 или 1.");
+    }
+
+    private static string ResolveFamilyVersion(int stage, string version)
+    {
+        var name = NormalizeFamilyVersion(version);
+        var path = Path.Combine(FamilyReportRoot(stage), name + ".json");
+
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"JSON {name} для MCP{stage} не найден.");
+
+        return path;
+    }
+
+    private static string NextFamilyVersion(int stage)
+    {
+        var root = FamilyReportRoot(stage);
+        Directory.CreateDirectory(root);
+
+        var max = Directory.EnumerateFiles(root, "V*.json", SearchOption.TopDirectoryOnly)
+            .Select(Path.GetFileNameWithoutExtension)
+            .Select(x => Regex.Match(x ?? "", @"^V(\d+)$", RegexOptions.IgnoreCase))
+            .Where(x => x.Success)
+            .Select(x => int.Parse(x.Groups[1].Value))
+            .DefaultIfEmpty(0)
+            .Max();
+
+        return $"V{max + 1:000}";
+    }
+
+    private static FamilyJob ParseFamilyJob(ToolResult result)
+    {
+        if (result.IsError || string.IsNullOrWhiteSpace(result.StructuredContent))
+            throw new InvalidOperationException(result.Text);
+
+        using var document = JsonDocument.Parse(result.StructuredContent);
+        var root = document.RootElement;
+
+        string? Get(string name) =>
+            root.TryGetProperty(name, out var value) &&
+            value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+
+        return new FamilyJob(
+            Get("runId") ?? throw new InvalidDataException("Нет runId."),
+            Get("status") ?? throw new InvalidDataException("Нет status."),
+            Get("resultPath"),
+            Get("htmlPath"),
+            Get("error"));
+    }
+
+    private static async Task<FamilyJob> WaitFamilyJobAsync(
+        string server,
+        ToolResult started,
+        CancellationToken cancellationToken)
+    {
+        var job = ParseFamilyJob(started);
+
+        var statusTool = server switch
+        {
+            "mcp4" => "get-extraction-status",
+            "mcp5" => "get-comparison-status",
+            "mcp6" => "get-unification-status",
+            _ => throw new ArgumentException("Неизвестный MCP-сервер.")
+        };
+
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(30);
+
+        while (job.Status is "queued" or "running")
+        {
+            if (DateTimeOffset.UtcNow >= deadline)
+                throw new TimeoutException("Истекло время ожидания MCP.");
+
+            await Task.Delay(750, cancellationToken);
+
+            var status = await ExecuteToolAsync(
+                server,
+                statusTool,
+                new Dictionary<string, object?> { ["runId"] = job.RunId },
+                cancellationToken);
+
+            job = ParseFamilyJob(status);
+        }
+
+        if (job.Status is not ("complete" or "partial" or "empty"))
+            throw new InvalidOperationException(
+                job.Error ?? $"MCP завершился со статусом {job.Status}.");
+
+        if (string.IsNullOrWhiteSpace(job.ResultPath))
+            throw new InvalidDataException("MCP не вернул JSON результата.");
+
+        return job;
+    }
+
+    private static string PublishFamilyResult(int stage, FamilyJob job)
+    {
+        var version = NextFamilyVersion(stage);
+        var root = FamilyReportRoot(stage);
+
+        File.Copy(
+            job.ResultPath!,
+            Path.Combine(root, version + ".json"),
+            false);
+
+        if (stage == 6 &&
+            !string.IsNullOrWhiteSpace(job.HtmlPath) &&
+            File.Exists(job.HtmlPath))
+        {
+            File.Copy(
+                job.HtmlPath,
+                Path.Combine(root, version + ".html"),
+                false);
+        }
+
+        return version;
+    }
     public static async Task HandleAsync(string command, CancellationToken cancellationToken)
     {
-        var parts = command.Split((char[]?)null, 3, StringSplitOptions.RemoveEmptyEntries);
+        var parts = command.Split(
+    (char[]?)null,
+    3,
+    StringSplitOptions.RemoveEmptyEntries);
+
+        var familyCommand =
+            parts.Length > 0 ? parts[0].ToLowerInvariant() : "";
+
+        if (familyCommand is
+            "mcp4-tools" or "mcp5-tools" or "mcp6-tools" or
+            "mcp4-call" or "mcp5-call" or "mcp6-call")
+        {
+            var familyServer = familyCommand[..4];
+
+            if (familyCommand.EndsWith("-tools", StringComparison.Ordinal))
+            {
+                await using var familyClient =
+                    await McpClient.CreateAsync(
+                        CreateTransport(GetServer(familyServer)),
+                        cancellationToken: cancellationToken);
+
+                foreach (var tool in await familyClient.ListToolsAsync(
+                             cancellationToken: cancellationToken))
+                    Console.WriteLine($"{tool.Name}: {tool.Description}");
+
+                return;
+            }
+
+            if (parts.Length < 2)
+            {
+                Console.WriteLine($"{familyServer}-call: не указана команда.");
+                return;
+            }
+
+            var toolName = parts[1];
+            var familyArguments = new Dictionary<string, object?>();
+            var shortFamilyCommand = false;
+
+            if (familyServer == "mcp4" &&
+                toolName.Equals(
+                    "extract-family-library",
+                    StringComparison.OrdinalIgnoreCase) &&
+                parts.Length == 2)
+            {
+                familyArguments["mode"] = "library";
+                shortFamilyCommand = true;
+            }
+            else if (familyServer == "mcp5" &&
+                     toolName.Equals(
+                         "compare-family-library",
+                         StringComparison.OrdinalIgnoreCase) &&
+                     parts.Length == 3 &&
+                     !parts[2].TrimStart().StartsWith("{", StringComparison.Ordinal))
+            {
+                familyArguments["mcp4Path"] =
+                    ResolveFamilyVersion(4, parts[2]);
+
+                shortFamilyCommand = true;
+            }
+            else if (familyServer == "mcp6" &&
+                     toolName.Equals("recommend-family-from-passport", StringComparison.OrdinalIgnoreCase) &&
+                     parts.Length == 3 &&
+                     !parts[2].TrimStart().StartsWith("{", StringComparison.Ordinal))
+            {
+                PassportCommand.Arguments passportCall;
+                try { passportCall = PassportCommand.Parse(parts[2]); }
+                catch (ArgumentException error) { Console.WriteLine(error.Message); return; }
+                // Verify publication before launching a durable job. The server resolves the version again.
+                ResolveFamilyVersion(4, passportCall.Version);
+                familyArguments["mcp4Version"] = passportCall.Version;
+                familyArguments["passportName"] = passportCall.FileName;
+                shortFamilyCommand = true;
+            }
+            else if (familyServer == "mcp6" &&
+                     toolName.Equals(
+                         "recommend-family-unification",
+                         StringComparison.OrdinalIgnoreCase) &&
+                     parts.Length == 3 &&
+                     !parts[2].TrimStart().StartsWith("{", StringComparison.Ordinal))
+            {
+                var mcp5Path = ResolveFamilyVersion(5, parts[2]);
+
+                using var document =
+                    JsonDocument.Parse(File.ReadAllText(mcp5Path));
+
+                var mcp4Path = document.RootElement
+                    .GetProperty("sourceMcp4")
+                    .GetProperty("manifestPath")
+                    .GetString()
+                    ?? throw new InvalidDataException(
+                        "JSON MCP5 не содержит ссылку на MCP4.");
+
+                familyArguments["mcp4Path"] = mcp4Path;
+                familyArguments["mcp5Path"] = mcp5Path;
+                familyArguments["useLlm"] = true;
+
+                shortFamilyCommand = true;
+            }
+            else if (parts.Length == 3)
+            {
+                using var document = JsonDocument.Parse(parts[2]);
+
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                    throw new ArgumentException(
+                        "Аргументы должны быть JSON-объектом.");
+
+                foreach (var property in document.RootElement.EnumerateObject())
+                    if (!familyArguments.TryAdd(
+                            property.Name,
+                            property.Value.Clone()))
+                        throw new ArgumentException(
+                            "Повторяющееся поле аргументов.");
+            }
+
+            var familyResult = await ExecuteToolAsync(
+                familyServer,
+                toolName,
+                familyArguments,
+                cancellationToken);
+
+            if (!shortFamilyCommand)
+            {
+                Console.WriteLine(familyResult.Text);
+                return;
+            }
+
+            if (toolName.Equals("recommend-family-from-passport", StringComparison.OrdinalIgnoreCase))
+                Console.WriteLine($"Анализ паспорта запущен; runId={ParseFamilyJob(familyResult).RunId}");
+
+            var job = await WaitFamilyJobAsync(
+                familyServer,
+                familyResult,
+                cancellationToken);
+
+            var stage = familyServer[3] - '0';
+            var version = PublishFamilyResult(stage, job);
+
+            Console.WriteLine($"MCP{stage} готов. JSON: {version}");
+
+            if (stage == 6)
+            {
+                var html = Path.Combine(
+                    FamilyReportRoot(6),
+                    version + ".html");
+
+                if (File.Exists(html))
+                    Console.WriteLine($"HTML: {html}");
+            }
+
+            return;
+        }
         var prefix = parts.Length > 0 && parts[0].StartsWith("mcp3-", StringComparison.OrdinalIgnoreCase)
     ? "mcp3"
     : parts.Length > 0 && parts[0].StartsWith("mcp2-", StringComparison.OrdinalIgnoreCase)
