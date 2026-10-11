@@ -140,6 +140,11 @@ public interface IEmbeddingClient
     Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken cancellationToken);
 }
 
+public interface IQueryEmbeddingClient
+{
+    Task<float[][]> EmbedQueryAsync(string question, CancellationToken cancellationToken);
+}
+
 public interface IRagAnswerGenerator
 {
     Task<string> GenerateAsync(RagAnswerRequest request, CancellationToken cancellationToken);

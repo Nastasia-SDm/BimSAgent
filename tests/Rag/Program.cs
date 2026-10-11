@@ -28,6 +28,12 @@ async Task Throws(Func<Task> action, string name)
 }
 
 const string landing = "КркНес_ЛПлощадка_Монолитная";
+await LocalRagTests.Run(Check, root);
+if (args.Contains("--local-only"))
+{
+    Console.WriteLine($"{passed} local RAG checks passed.");
+    return;
+}
 const string beam = "КркНес_Балка_Монолитная";
 var fixture = Path.Combine(root, "Семейства с пробелами.docx");
 WriteDocument(fixture);

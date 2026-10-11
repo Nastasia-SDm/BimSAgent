@@ -74,6 +74,7 @@ while (!shutdown.IsCancellationRequested)
 
     try
     {
+        using var llmDiagnostics = agent.BeginLlmRequest();
         if (input.TrimStart().Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries)[0].Equals("rag", StringComparison.OrdinalIgnoreCase))
         {
             try { await RagCommands.RunAsync(RagCommands.Split(input), shutdown.Token, activeTaskId: agent.ActiveTaskId); }
@@ -197,7 +198,7 @@ while (!shutdown.IsCancellationRequested)
 
 static async Task<bool> UpdateFactsIfNeededAsync(BimSAgent agent, string message, CancellationToken cancellationToken)
 {
-    if (agent.Strategy != "sticky-facts") return true;
+    if (agent.Strategy != "sticky-facts" || agent.IsLocalLlm) return true;
     Console.WriteLine("Параметры отдельного запроса для обновления долгосрочных фактов:");
     var options = await ReadOptionsAsync(cancellationToken);
     if (options is null) return false;

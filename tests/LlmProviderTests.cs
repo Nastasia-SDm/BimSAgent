@@ -23,14 +23,41 @@ static class LlmProviderTests
             ((HttpClient)field.GetValue(agent)!).Dispose();
             field.SetValue(agent, new HttpClient(fake));
             check(agent.LlmDescription == "Ollama / qwen3:8b", "local startup description");
+            McpCommands.Events.Clear();
             check(await agent.AskWithMcpAsync("hello", 500, 0) == "local answer", "ordinary local response without OpenAI key");
             await agent.UpdateMemoryAsync();
-            check(fake.Formats.Contains("mcp_plan") && fake.Formats.Contains("invariant_check") && fake.Formats.Contains("memory_changes"),
-                "local planner, invariant reviewer and post-answer memory all use Ollama");
+            check(fake.Calls == 1 && fake.Formats.Count == 0 && McpCommands.Events.Count == 0,
+                "ordinary local turn has one call, no catalog, planner, invariant review or memory classifier");
+            check(agent.LocalLlmCalls is [{ Stage: "answer", Succeeded: true }] && agent.LocalLlmCalls[0].Duration >= TimeSpan.Zero,
+                "local diagnostics contain stage, count, duration and success");
+            check(fake.LastInstructions.Contains("Обязательные инварианты") && fake.LastInstructions.Contains("Revit API 2024"),
+                "local instructions and invariants retained in primary call");
+            check(File.ReadAllText("history.json").Contains("local answer") && File.ReadAllText("short-term-memory.json").Contains("local answer"),
+                "local history and short-term memory preserved");
+            foreach (var ordinary in new[] { "Как создать стену через Revit API?", "Объясни BIM", "Как сравнить модели в C#?", "hello" })
+                check(!BimSAgent.RequiresMcpPlanning(ordinary), "general question bypasses local planner: " + ordinary);
+            foreach (var routed in new[] { "Прочитай текущую модель Revit", "Сравни версии модели", "get-model", "compare-model-versions", "Покажи изменения в моей модели" })
+                check(BimSAgent.RequiresMcpPlanning(routed), "live model request retains planner: " + routed);
+            for (var server = 1; server <= 6; server++)
+            {
+                fake.Plan = JsonSerializer.Serialize(new { useMcp = true, steps = new[]
+                    { new { server = "mcp" + server, tool = "get-model", argumentsJson = "{}" } }, reason = "fixture" });
+                McpCommands.Events.Clear();
+                var start = fake.Calls;
+                await agent.AskWithMcpAsync("MCP" + server + " fixture", 500, 0);
+                check(fake.Calls == start + 2 && agent.LastResponseUsedMcp && McpCommands.Events.SequenceEqual(new[] { "catalog", "get-model" }),
+                    "explicit MCP" + server + " keeps planner and execution with one final answer");
+                check(agent.LocalLlmCalls.Select(c => c.Stage).SequenceEqual(new[] { "mcp_plan", "answer" }),
+                    "MCP diagnostics group both calls in one request");
+            }
             Environment.SetEnvironmentVariable("OPENAI_API_KEY", "must-not-be-sent-to-ollama");
             check(await agent.AskAsync("key present", 500, 0) == "local answer", "local remains local when cloud key is configured");
             Environment.SetEnvironmentVariable("OPENAI_API_KEY", null);
             agent.TryHandleContextCommand("strategy sticky-facts", out _);
+            var ordinaryStart = fake.Calls;
+            await agent.AskWithMcpAsync("ordinary sticky question", 500, 0);
+            await agent.UpdateMemoryAsync();
+            check(fake.Calls == ordinaryStart + 1, "sticky-facts context needs only one local answer call");
             await agent.UpdateFactsAsync("fixture fact", 500, 0);
             check(fake.JsonMode, "local facts use JSON mode");
             var before = fake.Calls;
@@ -39,6 +66,7 @@ static class LlmProviderTests
             fake.Fail = true;
             try { await agent.AskAsync("failure", 500, 0); throw new Exception("failure accepted"); }
             catch (InvalidOperationException) { check(fake.Calls == before + 1, "Ollama failure has no cloud fallback"); }
+            check(agent.LocalLlmCalls is [{ Stage: "answer", Succeeded: false }], "failed local call also recorded");
 
             Environment.SetEnvironmentVariable("BIMS_LLM_PROVIDER", "unknown");
             try { using var invalid = new BimSAgent(); throw new Exception("invalid provider accepted"); }
@@ -61,6 +89,8 @@ static class LlmProviderTests
     {
         public int Calls;
         public bool Fail, JsonMode;
+        public string Plan = "{\"useMcp\":false,\"steps\":[],\"reason\":\"ordinary\"}";
+        public string LastInstructions = "";
         public HashSet<string> Formats = [];
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -73,6 +103,7 @@ static class LlmProviderTests
             check(body.GetProperty("model").GetString() == "qwen3:8b" && !body.GetProperty("stream").GetBoolean()
                 && !body.GetProperty("think").GetBoolean(), "native Ollama model and non-streaming generation");
             check(body.GetProperty("messages")[0].GetProperty("role").GetString() == "system", "local preserves instructions");
+            LastInstructions = body.GetProperty("messages")[0].GetProperty("content").GetString()!;
             var answer = "local answer";
             if (body.TryGetProperty("format", out var format))
             {
@@ -80,7 +111,7 @@ static class LlmProviderTests
                 else
                 {
                     var properties = format.GetProperty("properties");
-                    if (properties.TryGetProperty("useMcp", out _)) { Formats.Add("mcp_plan"); answer = "{\"useMcp\":false,\"steps\":[],\"reason\":\"ordinary\"}"; }
+                    if (properties.TryGetProperty("useMcp", out _)) { Formats.Add("mcp_plan"); answer = Plan; }
                     else if (properties.TryGetProperty("changes", out _)) { Formats.Add("memory_changes"); answer = "{\"changes\":[]}"; }
                     else { Formats.Add("invariant_check"); answer = "{\"violations\":[]}"; }
                 }

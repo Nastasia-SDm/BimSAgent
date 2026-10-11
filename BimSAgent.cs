@@ -9,6 +9,43 @@ public sealed class BimSAgent : IDisposable
     public const string Model = "gpt-4.1-nano";
     private readonly bool _useOllama = ReadProvider();
     public string LlmDescription => _useOllama ? "Ollama / qwen3:8b" : $"OpenAI / {Model}";
+    public bool IsLocalLlm => _useOllama;
+    public sealed record LlmCallDiagnostic(string Stage, TimeSpan Duration, bool Succeeded);
+    private readonly List<LlmCallDiagnostic> _localCalls = [];
+    public IReadOnlyList<LlmCallDiagnostic> LocalLlmCalls => _localCalls.AsReadOnly();
+    private int _localRequestDepth;
+
+    // Nesting lets the console include preparation and reporting in the same request,
+    // while API callers also get a complete diagnostic scope.
+    public IDisposable BeginLlmRequest()
+    {
+        if (_useOllama && _localRequestDepth++ == 0) _localCalls.Clear();
+        return new LlmRequestScope(this);
+    }
+
+    private sealed class LlmRequestScope(BimSAgent agent) : IDisposable
+    {
+        private bool _disposed;
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (agent._useOllama && --agent._localRequestDepth == 0)
+                Console.Error.WriteLine($"[LLM local] total calls={agent._localCalls.Count}, model=qwen3:8b");
+        }
+    }
+
+    public static bool RequiresMcpPlanning(string prompt)
+    {
+        // Local routing is deterministic and never needs a model or a tools catalog.
+        // Explicit MCP/tool names also provide an escape hatch for ambiguous requests.
+        return System.Text.RegularExpressions.Regex.IsMatch(prompt,
+            @"\bmcp[1-6]?\b|\b(get-model|get-documentation|compare-model-versions|extract-family-library|compare-family-library|recommend-family-unification|recommend-family-from-passport)\b|" +
+            @"(?:прочитай|получи|покажи|проверь|проанализируй|считай|сравни|сравнить|изменения).{0,80}(?:текущ\w* модел|мо\w* модел|верс\w* модел|снимк\w*|модел\w* revit)|" +
+            @"(?:текущ\w* модел|мо\w* модел|верс\w* модел).{0,80}(?:параметр|элемент|изменени|сравни)|" +
+            @"\b(read|inspect|compare|fetch|changes)\b.{0,80}\b(current model|my model|model versions|snapshots)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    }
 
     private static bool ReadProvider() => Environment.GetEnvironmentVariable("BIMS_LLM_PROVIDER")?.Trim().ToLowerInvariant() switch
     {
@@ -162,6 +199,10 @@ public sealed class BimSAgent : IDisposable
         Ты помогаешь разрабатывать и отлаживать C#-плагины и Dynamo через Revit API.
         Учитывай контекст выполнения Revit API, транзакции, единицы измерения,
         фильтрацию элементов, общие параметры, связанные модели и ограничения потоков.
+        По умолчанию отвечай кратко и по существу: для простого вопроса достаточно 2–4 коротких предложений.
+        Используй короткие абзацы и списки, когда они помогают чтению. Не пиши длинные статьи,
+        многочисленные варианты и длинные примеры кода без явного запроса. Подробности давай,
+        если пользователь явно просит подробнее; соблюдай явно заданный формат и профиль.
         Отвечай на языке пользователя, ясно и по существу. При запросе кода давай
         практические примеры и поясняй предположения и необходимые условия запуска.
         Используй только реальные и документированные возможности Autodesk Revit 2024
@@ -425,9 +466,16 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
     CancellationToken cancellationToken = default,
     Func<CancellationToken, Task>? prepareNonMcp = null)
     {
+        using var diagnostics = BeginLlmRequest();
         LastResponseUsedMcp = false;
         LastMcpContextSize = null;
         ValidateGenerationOptions(maxOutputTokens, temperature);
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        if (_useOllama && !RequiresMcpPlanning(prompt))
+        {
+            if (prepareNonMcp is not null) await prepareNonMcp(cancellationToken);
+            return await AskAsync(prompt, maxOutputTokens, temperature, cancellationToken);
+        }
         var plan = await CreateMcpPlanAsync(prompt, cancellationToken);
         foreach (var step in plan.Steps)
             Console.WriteLine($"PLAN: {step.Server} -> {step.Tool}");
@@ -516,6 +564,7 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
         int maxOutputTokens, double temperature, bool factsOnly = false, bool memoryOnly = false,
         bool singlePass = false, string? historyPrompt = null)
     {
+        using var diagnostics = BeginLlmRequest();
         LastResponseUsedMcp = singlePass;
         ValidateGenerationOptions(maxOutputTokens, temperature);
         LastTokenStatistics = null;
@@ -555,7 +604,7 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
         var result = await RequestCompletionAsync(payload, apiKey, cancellationToken);
         var answer = result.Answer;
         LastTokenStatistics = result.Statistics with { UserInput = userTokens, HistoryInput = historyTokens };
-        if (!memoryOnly && !singlePass)
+        if (!_useOllama && !memoryOnly && !singlePass)
             answer = await EnforceInvariantsAsync(payload, answer, invariantRules, apiKey, cancellationToken);
         if (memoryOnly)
         {
@@ -582,7 +631,7 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
         SaveHistory(updatedHistory);
         _history = updatedHistory;
         AppendShortTerm("assistant", answer, apiKey);
-        _newMemoryDialogue = singlePass ? [] :
+        _newMemoryDialogue = singlePass || _useOllama ? [] :
             [new Message("user", HideKey(prompt)), new Message("assistant", answer)];
         _newMemoryScope = MemoryScope;
         if (_activeTaskId is null && Strategy == "branching" && _state.ActiveBranch is { } name)
@@ -598,7 +647,31 @@ $"RESULT: {step.Server} -> {step.Tool} = {(result.IsError ? "ERROR" : "OK")}");
     private async Task<(string Answer, TokenStatistics Statistics)> RequestCompletionAsync(Dictionary<string, object> payload, string apiKey, CancellationToken cancellationToken)
     {
         if (_useOllama)
-            return await RequestOllamaAsync(payload, cancellationToken);
+        {
+            using var diagnostics = BeginLlmRequest();
+            var stage = "answer";
+            if (payload.TryGetValue("text", out var text))
+            {
+                var format = JsonSerializer.SerializeToElement(text).GetProperty("format");
+                stage = format.TryGetProperty("name", out var name) ? name.GetString() ?? "structured" : "facts_update";
+            }
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            var succeeded = false;
+            var number = _localCalls.Count + 1;
+            Console.Error.WriteLine($"[LLM local] call={number} stage={stage} started");
+            try
+            {
+                var result = await RequestOllamaAsync(payload, cancellationToken);
+                succeeded = true;
+                return result;
+            }
+            finally
+            {
+                timer.Stop();
+                _localCalls.Add(new(stage, timer.Elapsed, succeeded));
+                Console.Error.WriteLine($"[LLM local] call={number} stage={stage} elapsed_ms={timer.ElapsedMilliseconds} status={(succeeded ? "ok" : "error")}");
+            }
+        }
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses");
         // The key is used only for authentication and is never written to disk or logs.
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
@@ -890,6 +963,11 @@ if (root.TryGetProperty("usage", out var errorUsage) &&
 
     public Task<string> UpdateMemoryAsync(CancellationToken cancellationToken = default)
     {
+        if (_useOllama)
+        {
+            _newMemoryDialogue = [];
+            return Task.FromResult("Local: автоматическая LLM-классификация памяти отключена; история и short-term сохранены.");
+        }
         // Only provably empty input can be skipped locally. Short acknowledgements may still
         // accompany meaningful assistant results, so never filter them by keywords or length.
         if (_newMemoryDialogue.Length == 0 || _newMemoryDialogue.All(m => string.IsNullOrWhiteSpace(m.Content)) ||

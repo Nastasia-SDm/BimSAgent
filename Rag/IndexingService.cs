@@ -27,8 +27,11 @@ public sealed class IndexingService(DocxDocumentExtractor extractor, RagTokenize
         if (visionClient == null && !retryAssets && Matches(existingFixed) && Matches(existingStructural) && existingFixed!.BuildId == existingStructural!.BuildId)
             return (existingFixed.Chunks.Length, existingStructural.Chunks.Length, true);
 
-        document = await DocumentAssetProcessing.ProcessAsync(document, existingStructural?.Assets ?? [], assetProcessor, cancellationToken);
-        document = await VisualIndexing.ProcessAsync(document, existingStructural?.Assets ?? [], visionClient, visionFamily, cancellationToken);
+        if (!Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            document = await DocumentAssetProcessing.ProcessAsync(document, existingStructural?.Assets ?? [], assetProcessor, cancellationToken);
+            document = await VisualIndexing.ProcessAsync(document, existingStructural?.Assets ?? [], visionClient, visionFamily, cancellationToken);
+        }
         var fixedChunks = new FixedWindowChunker(tokenizer).Split(document).ToArray();
         var parents = new StructuralChunker(tokenizer).Split(document).ToArray();
         var structuralChunks = new StructuralChunker(tokenizer, 650).Split(document).Select(child => child with

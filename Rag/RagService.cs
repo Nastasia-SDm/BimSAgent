@@ -32,9 +32,10 @@ public sealed class CosineRetriever : IRetriever
 }
 
 public sealed class RagService(IEmbeddingClient embeddings, IRagAnswerGenerator generator,
-    IIndexStore store, IRetriever retriever, RagTokenizer tokenizer, ChatVisualContext? visualContext = null)
+    IIndexStore store, IRetriever retriever, RagTokenizer tokenizer, ChatVisualContext? visualContext = null,
+    int contextTokens = 6000)
 {
-    private const int ContextTokens = 6000;
+    private readonly int ContextTokens = contextTokens;
 
     public async Task<RagAnswer> AskChatAsync(string message, IReadOnlyList<string> queries, RagChatContext chat,
         string strategy, int? topK, CancellationToken cancellationToken)
@@ -147,7 +148,9 @@ public sealed class RagService(IEmbeddingClient embeddings, IRagAnswerGenerator 
 
     private async Task<float[]> QueryEmbedding(string question, CancellationToken cancellationToken)
     {
-        var values = await embeddings.EmbedAsync([question], cancellationToken);
+        var values = embeddings is IQueryEmbeddingClient queryClient
+            ? await queryClient.EmbedQueryAsync(question, cancellationToken)
+            : await embeddings.EmbedAsync([question], cancellationToken);
         if (values.Length != 1) throw new InvalidDataException("Не получен embedding вопроса.");
         CosineRetriever.ValidateVector(values[0], embeddings.Options.Dimensions);
         return values[0];

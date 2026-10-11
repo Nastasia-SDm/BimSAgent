@@ -17,6 +17,8 @@ public sealed class DocxDocumentExtractor
 
     public ExtractedDocument Extract(string path)
     {
+        if (Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+            return PdfDocumentExtractor.Extract(path);
         if (!Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Ожидается документ .docx.");
         var fullPath = Path.GetFullPath(path);

@@ -4,7 +4,7 @@ public sealed record EmbeddingOptions(string Model = RagDefaults.EmbeddingModel,
 {
     public void Validate()
     {
-        var maximum = Model switch { "text-embedding-3-small" => 1536, "text-embedding-3-large" => 3072,
+        var maximum = Model switch { "text-embedding-3-small" => 1536, "text-embedding-3-large" => 3072, "nomic-embed-text:v1.5" when Dimensions == 768 => 768,
             _ => throw new ArgumentException("Поддерживаются text-embedding-3-small и text-embedding-3-large.") };
         if (Dimensions < 1 || Dimensions > maximum) throw new ArgumentException("Недопустимая размерность embeddings.");
     }

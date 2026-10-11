@@ -31,18 +31,23 @@ public static class RagChatCommands
                     default: throw new ArgumentException(Help);
                 }
             if (startNew && resume != null || baseline && improved) throw new ArgumentException("Несовместимые параметры. " + Help);
-            var directory = dataDirectory ?? RagDefaults.DataDirectory;
-            var store = new RagChatStore(Environment.GetEnvironmentVariable("BIMS_RAG_CHAT_DIRECTORY") ?? Path.Combine(directory, "chats"));
+            var local = RagProvider.IsLocal;
+            if (local) topK = Math.Min(topK ?? 2, 3);
+            var directory = RagProvider.DirectoryFor(dataDirectory, local);
+            var chatRoot = Environment.GetEnvironmentVariable("BIMS_RAG_CHAT_DIRECTORY");
+            var store = new RagChatStore(chatRoot == null ? Path.Combine(directory, "chats") : local ? Path.Combine(chatRoot, "ollama-nomic-v1.5") : chatRoot);
             using var lease = store.Lock();
             if (taskId is { } supplied) taskReader(supplied);
             var session = store.Open(startNew, resume, taskId);
             // Standalone CLI does not instantiate BimSAgent or touch its history/memory.
-            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
-            var api = new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
+            using var http = RagProvider.CreateHttp(local);
+            var api = local ? null : new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
+            var localApi = local ? new OllamaRagClient(http) : null;
             using var rerankHttp = RagRetrievalFactory.CreateHttpClient();
-            engine ??= new RagChatEngine(new RagService(api, api, new JsonIndexStore(directory),
-                RagRetrievalFactory.Create(rerankHttp, baseline), new(),
-                new ChatVisualContext(api, Path.Combine(directory, "visual-cache"), new())), api, taskReader);
+            engine ??= new RagChatEngine(new RagService((IEmbeddingClient?)localApi ?? api!, (IRagAnswerGenerator?)localApi ?? api!, new JsonIndexStore(directory),
+                local ? new HybridRetriever(new Bm25Reranker()) : RagRetrievalFactory.Create(rerankHttp, baseline), new(),
+                local ? null : new ChatVisualContext(api!, Path.Combine(directory, "visual-cache"), new()), contextTokens: local ? 1600 : 6000),
+                (IRagChatPlanner?)localApi ?? api!, taskReader);
             await output.WriteLineAsync($"RAG-чат {session.Id}; сообщений: {session.Turns.Length}; задача: {session.TaskId?.ToString() ?? "не привязана"}.");
             await output.WriteLineAsync("/new — новый; /resume <id> — продолжить; /state — состояние; /task <id>|none — привязка; /exit — вернуться.");
             while (!token.IsCancellationRequested)
@@ -71,7 +76,14 @@ public static class RagChatCommands
                         await output.WriteLineAsync("Привязка задачи сохранена. Этап задачи не изменён."); continue;
                     }
                     if (command.StartsWith('/')) throw new ArgumentException("Команды: /new, /resume <id>, /state, /task <id>|none, /exit.");
-                    var result = await engine.TurnAsync(session, line, strategy, topK, token);
+                    var timer = System.Diagnostics.Stopwatch.StartNew();
+                    (RagChatSession Session, RagAnswer Answer, string[] Queries) result;
+                    try { result = await engine.TurnAsync(session, line, strategy, topK, token); }
+                    finally
+                    {
+                        timer.Stop();
+                        await error.WriteLineAsync($"RAG: общее время запроса {timer.Elapsed.TotalSeconds:F2} с.");
+                    }
                     store.Save(result.Session); session = result.Session;
                     if (verbose)
                     {

@@ -6,7 +6,7 @@ namespace BimSAgentApp.Rag;
 
 public static class RagCommands
 {
-   public const string Help = "rag index \"<docx>\" [--vision [--family <точное имя>]] | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--baseline | --improved] [--top-k <максимум>] [--retrieval-only] [--json | --verbose] | " + RagChatCommands.Help;
+   public const string Help = "rag index \"<docx|pdf>\" [--vision [--family <точное имя>]] | rag status | rag compare \"<вопрос>\" | rag ask \"<вопрос>\" [--strategy fixed|structural | --no-rag] [--baseline | --improved] [--top-k <максимум>] [--retrieval-only] [--json | --verbose] | " + RagChatCommands.Help;
 
     public static string[] Split(string line)
     {
@@ -34,6 +34,8 @@ public static class RagCommands
     {
         output ??= Console.Out;
         error ??= Console.Error;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        var timed = args.Length > 1 && (args[1].Equals("ask", StringComparison.OrdinalIgnoreCase) || args[1].Equals("compare", StringComparison.OrdinalIgnoreCase));
         try
         {
             if (args.Length < 2 || !args[0].Equals("rag", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException(Help);
@@ -42,7 +44,8 @@ public static class RagCommands
                 return await RagChatCommands.RunAsync(args, cancellationToken, output: output, error: error,
                     dataDirectory: dataDirectory, activeTaskId: activeTaskId);
             if (command is "help" or "--help") { await output.WriteLineAsync(Help); return 0; }
-            var store = new JsonIndexStore(dataDirectory ?? RagDefaults.DataDirectory);
+            var local = RagProvider.IsLocal;
+            var store = new JsonIndexStore(RagProvider.DirectoryFor(dataDirectory, local));
             if (command == "status")
             {
                 if (args.Length != 2) throw new ArgumentException(Help);
@@ -100,15 +103,20 @@ public static class RagCommands
 
             if (noRag && (baseline || improved))
                 throw new ArgumentException("--baseline/--improved не совмещаются с --no-rag.");
-            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
-            var api = new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
-            var embeddings = embeddingClient ?? api;
+            if (local && vision) throw new ArgumentException("Local RAG: --vision пока недоступен; облачные OCR/vision не вызываются.");
+            if (vision && Path.GetExtension(args[2]).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("PDF: поддерживается текстовый слой; --vision для PDF пока недоступен.");
+            if (local) topK = Math.Min(topK ?? 2, 3);
+            using var http = RagProvider.CreateHttp(local);
+            var api = local ? null : new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
+            var localApi = local ? new OllamaRagClient(http) : null;
+            var embeddings = embeddingClient ?? (IEmbeddingClient?)localApi ?? api!;
             var tokenizer = new RagTokenizer();
             if (command == "index")
             {
                 if (visionFamily != null && !vision) throw new ArgumentException("--family требует --vision.");
                 IDocumentAssetProcessor? processor = null;
-                var assetUrl = Environment.GetEnvironmentVariable("BIMS_ASSET_URL");
+                var assetUrl = local ? null : Environment.GetEnvironmentVariable("BIMS_ASSET_URL");
                 using var assetHttp = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false,
                     UseProxy = !(Uri.TryCreate(assetUrl, UriKind.Absolute, out var assetUri) && assetUri.IsLoopback) }) { Timeout = TimeSpan.FromMinutes(5) };
                 if (!string.IsNullOrWhiteSpace(assetUrl)) processor = new HttpDocumentAssetProcessor(assetHttp, new Uri(assetUrl),
@@ -120,14 +128,14 @@ public static class RagCommands
                 return 0;
             }
             using var rerankHttp = RagRetrievalFactory.CreateHttpClient();
-            IRetriever retriever = RagRetrievalFactory.Create(rerankHttp, baseline);
+            IRetriever retriever = local ? new HybridRetriever(new Bm25Reranker()) : RagRetrievalFactory.Create(rerankHttp, baseline);
 
             var service = new RagService(
                 embeddings,
-                answerGenerator ?? api,
+                answerGenerator ?? (IRagAnswerGenerator?)localApi ?? api!,
                 store,
                 retriever,
-                tokenizer);
+                tokenizer, contextTokens: local ? 1600 : 6000);
             if (command == "compare")
             {
                 var result = await service.CompareAsync(args[2], topK, cancellationToken: cancellationToken);
@@ -162,11 +170,16 @@ public static class RagCommands
             await error.WriteLineAsync(cancellationToken.IsCancellationRequested ? "RAG: операция отменена." : "RAG: время ожидания API истекло.");
             return 1;
         }
-        catch (Exception e) when (e is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or InvalidDataException or IOException or UnauthorizedAccessException
             or HttpRequestException or JsonException or System.Xml.XmlException or DocumentFormat.OpenXml.Packaging.OpenXmlPackageException)
         {
-            await error.WriteLineAsync(e is HttpRequestException ? "RAG: не удалось связаться с OpenAI." : "RAG: " + e.Message);
+            await error.WriteLineAsync(e is HttpRequestException ? "RAG: не удалось связаться с выбранным LLM-провайдером." : "RAG: " + e.Message);
             return 1;
+        }
+        finally
+        {
+            timer.Stop();
+            if (timed) await error.WriteLineAsync($"RAG: общее время запроса {timer.Elapsed.TotalSeconds:F2} с.");
         }
     }
 
