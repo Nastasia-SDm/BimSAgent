@@ -33,7 +33,7 @@ public sealed class CosineRetriever : IRetriever
 
 public sealed class RagService(IEmbeddingClient embeddings, IRagAnswerGenerator generator,
     IIndexStore store, IRetriever retriever, RagTokenizer tokenizer, ChatVisualContext? visualContext = null,
-    int contextTokens = 6000)
+    int contextTokens = 6000, bool compactContext = false)
 {
     private readonly int ContextTokens = contextTokens;
 
@@ -182,5 +182,10 @@ public sealed class RagService(IEmbeddingClient embeddings, IRagAnswerGenerator 
     }
 
     private async Task<RetrievalSelection> SelectContext(RagIndex index, float[] vector, string question, int? topK, CancellationToken cancellationToken)
-        => new ContextAssembler(tokenizer).Assemble(await retriever.RetrieveAsync(index, vector, question, topK, cancellationToken), ContextTokens, index);
+    {
+        var selection = await retriever.RetrieveAsync(index, vector, question, topK, cancellationToken);
+        var assembler = new ContextAssembler(tokenizer);
+        return compactContext ? assembler.AssembleLocal(selection, ContextTokens, question, topK ?? 2)
+            : assembler.Assemble(selection, ContextTokens, index);
+    }
 }

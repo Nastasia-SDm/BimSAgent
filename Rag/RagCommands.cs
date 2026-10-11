@@ -45,7 +45,8 @@ public static class RagCommands
                     dataDirectory: dataDirectory, activeTaskId: activeTaskId);
             if (command is "help" or "--help") { await output.WriteLineAsync(Help); return 0; }
             var local = RagProvider.IsLocal;
-            var store = new JsonIndexStore(RagProvider.DirectoryFor(dataDirectory, local));
+            var directory = RagProvider.DirectoryFor(dataDirectory, local);
+            var store = new JsonIndexStore(directory);
             if (command == "status")
             {
                 if (args.Length != 2) throw new ArgumentException(Help);
@@ -109,7 +110,7 @@ public static class RagCommands
             if (local) topK = Math.Min(topK ?? 2, 3);
             using var http = RagProvider.CreateHttp(local);
             var api = local ? null : new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
-            var localApi = local ? new OllamaRagClient(http) : null;
+            var localApi = local ? new OllamaRagClient(http, Path.Combine(directory, "query-embeddings")) : null;
             var embeddings = embeddingClient ?? (IEmbeddingClient?)localApi ?? api!;
             var tokenizer = new RagTokenizer();
             if (command == "index")
@@ -135,7 +136,7 @@ public static class RagCommands
                 answerGenerator ?? (IRagAnswerGenerator?)localApi ?? api!,
                 store,
                 retriever,
-                tokenizer, contextTokens: local ? 1600 : 6000);
+                tokenizer, contextTokens: local ? 1000 : 6000, compactContext: local);
             if (command == "compare")
             {
                 var result = await service.CompareAsync(args[2], topK, cancellationToken: cancellationToken);

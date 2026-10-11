@@ -42,11 +42,11 @@ public static class RagChatCommands
             // Standalone CLI does not instantiate BimSAgent or touch its history/memory.
             using var http = RagProvider.CreateHttp(local);
             var api = local ? null : new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
-            var localApi = local ? new OllamaRagClient(http) : null;
+            var localApi = local ? new OllamaRagClient(http, Path.Combine(directory, "query-embeddings")) : null;
             using var rerankHttp = RagRetrievalFactory.CreateHttpClient();
             engine ??= new RagChatEngine(new RagService((IEmbeddingClient?)localApi ?? api!, (IRagAnswerGenerator?)localApi ?? api!, new JsonIndexStore(directory),
                 local ? new HybridRetriever(new Bm25Reranker()) : RagRetrievalFactory.Create(rerankHttp, baseline), new(),
-                local ? null : new ChatVisualContext(api!, Path.Combine(directory, "visual-cache"), new()), contextTokens: local ? 1600 : 6000),
+                local ? null : new ChatVisualContext(api!, Path.Combine(directory, "visual-cache"), new()), contextTokens: local ? 1000 : 6000, compactContext: local),
                 (IRagChatPlanner?)localApi ?? api!, taskReader);
             await output.WriteLineAsync($"RAG-чат {session.Id}; сообщений: {session.Turns.Length}; задача: {session.TaskId?.ToString() ?? "не привязана"}.");
             await output.WriteLineAsync("/new — новый; /resume <id> — продолжить; /state — состояние; /task <id>|none — привязка; /exit — вернуться.");

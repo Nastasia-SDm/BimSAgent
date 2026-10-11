@@ -34,6 +34,14 @@ static class LlmProviderTests
                 "local instructions and invariants retained in primary call");
             check(File.ReadAllText("history.json").Contains("local answer") && File.ReadAllText("short-term-memory.json").Contains("local answer"),
                 "local history and short-term memory preserved");
+            await agent.AskAsync("short answer", 32768, 2);
+            check(fake.LastLimit == 256 && fake.LastTemperature == 0.2 && fake.LastWindow == 3072,
+                "ordinary local clamps output, temperature and context window");
+            check(fake.LastInstructions.Contains("Не выдумывай API") && fake.LastInput.Contains("hello"),
+                "compact local prompt retains important rules and recent dialogue");
+            await agent.AskAsync("Расскажи подробнее", 32768, 2);
+            check(fake.LastLimit == 768, "explicit detail request gets a larger bounded local answer");
+            check(File.ReadAllText("history.json").Contains("hello"), "context reduction never deletes persisted history");
             foreach (var ordinary in new[] { "Как создать стену через Revit API?", "Объясни BIM", "Как сравнить модели в C#?", "hello" })
                 check(!BimSAgent.RequiresMcpPlanning(ordinary), "general question bypasses local planner: " + ordinary);
             foreach (var routed in new[] { "Прочитай текущую модель Revit", "Сравни версии модели", "get-model", "compare-model-versions", "Покажи изменения в моей модели" })
@@ -91,6 +99,9 @@ static class LlmProviderTests
         public bool Fail, JsonMode;
         public string Plan = "{\"useMcp\":false,\"steps\":[],\"reason\":\"ordinary\"}";
         public string LastInstructions = "";
+        public int LastLimit, LastWindow;
+        public double LastTemperature;
+        public string LastInput = "";
         public HashSet<string> Formats = [];
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -104,6 +115,10 @@ static class LlmProviderTests
                 && !body.GetProperty("think").GetBoolean(), "native Ollama model and non-streaming generation");
             check(body.GetProperty("messages")[0].GetProperty("role").GetString() == "system", "local preserves instructions");
             LastInstructions = body.GetProperty("messages")[0].GetProperty("content").GetString()!;
+            LastInput = body.GetProperty("messages").ToString();
+            LastLimit = body.GetProperty("options").TryGetProperty("num_predict", out var limit) ? limit.GetInt32() : 0;
+            LastWindow = body.GetProperty("options").TryGetProperty("num_ctx", out var window) ? window.GetInt32() : 0;
+            LastTemperature = body.GetProperty("options").TryGetProperty("temperature", out var temperature) ? temperature.GetDouble() : 0;
             var answer = "local answer";
             if (body.TryGetProperty("format", out var format))
             {
