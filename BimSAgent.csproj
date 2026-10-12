@@ -7,6 +7,7 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);bin/**;obj/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Remove="RevitAddin\**\*.cs" />
     <Compile Remove="tests\**\*.cs" />
     <None Update="invariants.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

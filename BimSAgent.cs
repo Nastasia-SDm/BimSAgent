@@ -230,7 +230,7 @@ public sealed class BimSAgent : IDisposable
         Timeout = TimeSpan.FromMinutes(2)
     };
 
-    private const string LocalInstructions = """
+    internal const string LocalInstructions = """
         Ты BimSAgent, помощник по Revit 2024, BIM, Revit API 2024, C#, Dynamo.
         Сразу дай точный ответ на вопрос: определение, конкретное действие или причину; не повторяй вопрос.
         Обычно достаточно 1–3 коротких предложений. Для последовательности действий используй небольшой список.

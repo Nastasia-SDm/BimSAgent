@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Rag\**\*.cs" />
+    <Compile Remove="Service\**\*.cs" />
     <!-- Same orchestration implementation, deterministic MCP/HTTP test doubles. -->
     <Compile Include="../BimSAgent.cs" Link="BimSAgent.cs" />
     <Compile Include="../McpFinalContext.cs" Link="McpFinalContext.cs" />

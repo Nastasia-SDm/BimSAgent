@@ -13,6 +13,11 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 // Experimental commands must not construct the stateful dialogue agent.
+if (args.Length > 0 && args[0].Equals("serve", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = await LocalHttpService.RunAsync(args[1..], shutdown.Token);
+    return;
+}
 if (args.Length > 0 && args[0].Equals("family", StringComparison.OrdinalIgnoreCase))
 {
     Environment.ExitCode = await FamilyLibraryCommands.RunAsync(args, shutdown.Token);
