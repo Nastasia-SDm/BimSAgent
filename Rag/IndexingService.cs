@@ -9,6 +9,13 @@ public sealed class IndexingService(DocxDocumentExtractor extractor, RagTokenize
         cancellationToken.ThrowIfCancellationRequested();
         embeddings.Options.Validate();
         var document = extractor.Extract(path);
+        return await IndexAsync(document, cancellationToken);
+    }
+
+    public async Task<(int Fixed, int Structural, bool Unchanged)> IndexAsync(ExtractedDocument document, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        embeddings.Options.Validate();
         // Explicit indexing also repairs an incompatible/corrupt index; normal retrieval still reports it.
         RagIndex? LoadExisting(string strategy)
         {
@@ -27,7 +34,7 @@ public sealed class IndexingService(DocxDocumentExtractor extractor, RagTokenize
         if (visionClient == null && !retryAssets && Matches(existingFixed) && Matches(existingStructural) && existingFixed!.BuildId == existingStructural!.BuildId)
             return (existingFixed.Chunks.Length, existingStructural.Chunks.Length, true);
 
-        if (Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase))
+        if (Path.GetExtension(document.Source).Equals(".docx", StringComparison.OrdinalIgnoreCase))
         {
             document = await DocumentAssetProcessing.ProcessAsync(document, existingStructural?.Assets ?? [], assetProcessor, cancellationToken);
             document = await VisualIndexing.ProcessAsync(document, existingStructural?.Assets ?? [], visionClient, visionFamily, cancellationToken);

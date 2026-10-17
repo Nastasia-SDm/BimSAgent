@@ -41,6 +41,12 @@ if (args.Length > 0 && args[0].Equals("help-index", StringComparison.OrdinalIgno
     return;
 }
 
+if (args.Length > 0 && args[0].Equals("review", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = await BimSAgentApp.Review.ReviewCommand.RunAsync(args, shutdown.Token);
+    return;
+}
+
 BimSAgent loadedAgent;
 try
 {

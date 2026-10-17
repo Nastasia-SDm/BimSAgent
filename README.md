@@ -759,3 +759,7 @@ dotnet run --project tests/Service/Service.Tests.csproj
 dotnet run --project tests/Orchestration.Tests.csproj
 dotnet run --project tests/Rag/Rag.Tests.csproj -- --local-only
 ```
+
+## AI review Pull Request
+
+Автоматическое review с существующим RAG и LLM: [настройка GitHub Secrets, запуск и ограничения](docs/ai-review.md).
