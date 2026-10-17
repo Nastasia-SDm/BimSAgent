@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <BimsFamilyCoreProject Condition="'$(BimsFamilyCoreProject)' == ''">D:\BIM-S-MCP-4\Core\BimS.Family.Core.csproj</BimsFamilyCoreProject>
+    <BimsFamilyCoreProject Condition="!Exists('$(BimsFamilyCoreProject)') and Exists('D:\1. Job\BIM-S-MCP-4\Core\BimS.Family.Core.csproj')">D:\1. Job\BIM-S-MCP-4\Core\BimS.Family.Core.csproj</BimsFamilyCoreProject>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -10,10 +12,11 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Remove="RevitAddin\**\*.cs" />
     <Compile Remove="tests\**\*.cs" />
+    <Compile Remove="tools\Review\**\*.cs;tools\Review.Tests\**\*.cs" />
     <None Update="invariants.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="D:\BIM-S-MCP-4\Core\BimS.Family.Core.csproj" />
+    <ProjectReference Include="$(BimsFamilyCoreProject)" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="DocumentFormat.OpenXml" Version="3.5.1" />
     <PackageReference Include="PdfPig" Version="0.1.11" />
