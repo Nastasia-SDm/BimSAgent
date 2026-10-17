@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace BimSAgentApp.Rag;
 
 // Native loopback APIs only. This client has no OpenAI key, vision client or cloud fallback.
-public sealed class OllamaRagClient(HttpClient http, string? queryCacheDirectory = null) : IEmbeddingClient, IQueryEmbeddingClient, IRagAnswerGenerator, IRagChatPlanner
+public sealed partial class OllamaRagClient(HttpClient http, string? queryCacheDirectory = null) : IEmbeddingClient, IQueryEmbeddingClient, IRagAnswerGenerator, IRagChatPlanner
 {
     public const string EmbeddingModel = "nomic-embed-text:v1.5";
     public EmbeddingOptions Options { get; } = new(EmbeddingModel, 768);

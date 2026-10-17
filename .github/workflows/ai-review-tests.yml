@@ -1,0 +1,20 @@
+name: AI review tests
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      # No secrets or write token in this job; it can test proposed code safely.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet run --project tools/Review.Tests/BimS.Review.Tests.csproj --configuration Release
+      - run: node --test .github/scripts/review.test.cjs

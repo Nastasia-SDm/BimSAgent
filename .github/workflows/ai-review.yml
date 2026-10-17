@@ -1,0 +1,81 @@
+name: BimSAgent AI review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open Pull Request number to review
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+    steps:
+      # Build ONLY the trusted base code. Never checkout, build or execute PR head code.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Initialize temporary review paths
+        run: |
+          echo "REVIEW_INPUT=$RUNNER_TEMP/bims-review-input.json" >> "$GITHUB_ENV"
+          echo "REVIEW_OUTPUT=$RUNNER_TEMP/bims-review.md" >> "$GITHUB_ENV"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build trusted review runner
+        id: build
+        continue-on-error: true
+        run: dotnet build tools/Review/BimS.Review.csproj --configuration Release --nologo
+      - name: Collect diff, changed files and RAG sources
+        id: prepare
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          # Git fetch credentials scoped to this collection step; never written to repository config.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: empty
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            // Use a transient authenticated header; do not log it or persist it.
+            process.env.GIT_CONFIG_VALUE_0 = 'AUTHORIZATION: basic ' + Buffer.from('x-access-token:' + process.env.GITHUB_TOKEN).toString('base64');
+            await require('./.github/scripts/prepare-review.cjs').prepare({github, context, core});
+      - name: Review with existing RAG and LLM clients
+        if: steps.prepare.outcome == 'success'
+        timeout-minutes: 6
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BIMS_LLM_PROVIDER: openai
+          BIMS_REVIEW_MODEL: ${{ vars.BIMS_REVIEW_MODEL }}
+          BIMS_REVIEW_TIMEOUT_SECONDS: '240'
+          BIMS_EMBEDDING_MODEL: ${{ vars.BIMS_EMBEDDING_MODEL || 'text-embedding-3-small' }}
+          BIMS_EMBEDDING_DIMENSIONS: ${{ vars.BIMS_EMBEDDING_DIMENSIONS || '1536' }}
+        run: dotnet tools/Review/bin/Release/net10.0/BimS.Review.dll review --input "$REVIEW_INPUT" --output "$REVIEW_OUTPUT"
+      - name: Publish or update PR comment
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          REVIEW_HEAD: ${{ steps.prepare.outputs.head_sha }}
+        with:
+          script: |
+            await require('./.github/scripts/publish-review.cjs').publish({github, context, core});
