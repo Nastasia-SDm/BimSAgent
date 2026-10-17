@@ -11,7 +11,7 @@ public sealed record ReviewSnapshot(string Repository, int Number, string BaseSh
 
 public static class ReviewCommand
 {
-    public static async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
+    public static async Task<int> RunAsync(string[] args, CancellationToken cancellationToken, HttpClient? httpClient = null)
     {
         if (args.Length != 5 || args[0] != "review" || args[1] != "--input" || args[3] != "--output")
         {
@@ -32,20 +32,27 @@ public static class ReviewCommand
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? throw new InvalidDataException("Empty snapshot.");
             Validate(snapshot);
             var local = RagProvider.IsLocal;
+            var tokenizer = new RagTokenizer();
+            var totalBudget = local ? 12000 : 45000;
+            var requiredTokens = tokenizer.Count(ReviewInput(snapshot, []));
+            if (requiredTokens > totalBudget - 1500)
+                throw new InvalidDataException("PR превышает бюджет review. Разделите изменения на меньшие PR.");
+            var contextBudget = Math.Min(local ? 2500 : 6500, totalBudget - requiredTokens - 512);
             if (!local && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENAI_API_KEY")))
                 throw new InvalidOperationException("Добавьте GitHub Actions Secret OPENAI_API_KEY.");
-            using var http = RagProvider.CreateHttp(local);
+            using var ownedHttp = httpClient is null ? RagProvider.CreateHttp(local) : null;
+            var http = httpClient ?? ownedHttp!;
             var cloud = local ? null : new OpenAiRagClient(http, embeddingOptions: EmbeddingOptions.FromEnvironment());
             var ollama = local ? new OllamaRagClient(http) : null;
             IEmbeddingClient embeddings = (IEmbeddingClient?)ollama ?? cloud!;
-            var tokenizer = new RagTokenizer();
             var store = new JsonIndexStore(directory);
             var document = BuildDocument(snapshot);
             await new IndexingService(new(), tokenizer, embeddings, store).IndexAsync(document, deadline.Token);
             var index = store.Load("fixed") ?? throw new InvalidDataException("Review index was not created.");
             var query = "BimSAgent code review architecture bugs regressions " + string.Join(" ", snapshot.Files.Select(f => f.Path)) +
-                "\n" + Clip(snapshot.Files.Select(f => f.Patch).FirstOrDefault(p => p.Length > 0) ?? "", tokenizer, 1200);
-            query = Clip(query, tokenizer, 1800);
+                "\n" + string.Join("\n", snapshot.Files.Where(f => f.Patch.Length > 0).Select(f =>
+                    f.Path + "\n" + Clip(f.Patch, tokenizer, Math.Max(24, 1200 / snapshot.Files.Length))));
+            query = Clip(query, tokenizer, 4000);
             var vectors = embeddings is IQueryEmbeddingClient queryClient
                 ? await queryClient.EmbedQueryAsync(query, deadline.Token)
                 : await embeddings.EmbedAsync([query], deadline.Token);
@@ -60,16 +67,11 @@ public static class ReviewCommand
                     : c.BlockOrdinals.Any(i => !documentationBlocks.Contains(i))).ToArray();
                 if (chunks.Length == 0) continue;
                 var retrieval = await new HybridRetriever(new Bm25Reranker()).RetrieveAsync(index with { Chunks = chunks }, vectors[0], query, 6, deadline.Token);
-                hits.AddRange(new ContextAssembler(tokenizer).Assemble(retrieval, local ? 1250 : 3250, index).Candidates.Where(h => h.Selected));
+                hits.AddRange(new ContextAssembler(tokenizer).Assemble(retrieval, contextBudget / 2, index).Candidates.Where(h => h.Selected));
             }
             var selected = hits.DistinctBy(h => h.Chunk.ChunkId).ToArray();
-            var input = JsonSerializer.Serialize(new
-            {
-                snapshot.Repository, snapshot.Number, snapshot.BaseSha, snapshot.HeadSha,
-                changes = snapshot.Files, coverage = snapshot.Coverage,
-                context = selected.Select(h => new { section = h.Chunk.Section, text = h.Chunk.Text })
-            });
-            if (tokenizer.Count(input) > (local ? 12000 : 45000))
+            var input = ReviewInput(snapshot, selected);
+            if (tokenizer.Count(input) > totalBudget)
                 throw new InvalidDataException("PR превышает бюджет review. Разделите изменения на меньшие PR.");
             var review = cloud != null ? await cloud.ReviewCodeAsync(input, deadline.Token)
                 : await ollama!.ReviewCodeAsync(input, deadline.Token);
@@ -79,7 +81,7 @@ public static class ReviewCommand
                 (snapshot.Coverage.Length == 0 ? "" : "\nОграничения покрытия:\n" + string.Join("\n", snapshot.Coverage.Select(c => "- " + c))) +
                 "\n\nАвтоматическое review; код и состояние PR не изменены.\n";
         }
-        catch (Exception e) when (e is OperationCanceledException or HttpRequestException or IOException or
+        catch (Exception e) when (e is OperationCanceledException or HttpRequestException or IOException or InvalidDataException or
             InvalidOperationException or ArgumentException or JsonException or KeyNotFoundException or UnauthorizedAccessException)
         {
             var diagnostic = e switch
@@ -119,6 +121,12 @@ public static class ReviewCommand
             throw new InvalidDataException("Invalid review snapshot or more than 50 changed files.");
     }
 
+    private static string ReviewInput(ReviewSnapshot snapshot, IEnumerable<RetrievalHit> selected) => JsonSerializer.Serialize(new
+    {
+        snapshot.Repository, snapshot.Number, snapshot.BaseSha, snapshot.HeadSha,
+        changes = snapshot.Files, coverage = snapshot.Coverage,
+        context = selected.Select(h => new { section = h.Chunk.Section, text = h.Chunk.Text })
+    }, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
     private static bool IsSha(string? sha) => System.Text.RegularExpressions.Regex.IsMatch(sha ?? "", "^[a-fA-F0-9]{40}$");
 
     public static ExtractedDocument BuildDocument(ReviewSnapshot snapshot)

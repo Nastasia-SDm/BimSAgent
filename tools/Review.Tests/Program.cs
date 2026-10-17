@@ -62,6 +62,7 @@ var fixture = Path.Combine(Path.GetTempPath(), "bims-review-fixture-" + Guid.New
 Directory.CreateDirectory(fixture);
 var oldKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
 var oldProvider = Environment.GetEnvironmentVariable("BIMS_LLM_PROVIDER");
+var oldDimensions = Environment.GetEnvironmentVariable("BIMS_EMBEDDING_DIMENSIONS");
 try
 {
     Environment.SetEnvironmentVariable("OPENAI_API_KEY", null); Environment.SetEnvironmentVariable("BIMS_LLM_PROVIDER", "openai");
@@ -69,6 +70,32 @@ try
     await File.WriteAllTextAsync(input, JsonSerializer.Serialize(snapshot));
     var exit = await ReviewCommand.RunAsync(["review", "--input", input, "--output", output], default);
     Check(exit == 0 && (await File.ReadAllTextAsync(output)).Contains("OPENAI_API_KEY"), "missing key writes non-blocking diagnostic comment");
+    Environment.SetEnvironmentVariable("OPENAI_API_KEY", "test-key");
+    Environment.SetEnvironmentVariable("BIMS_EMBEDDING_DIMENSIONS", "2");
+    using var pipelineHttp = new HttpClient(new Handler(async (request, token) =>
+    {
+        using var payload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        if (request.RequestUri!.AbsolutePath.EndsWith("embeddings"))
+            return Json(new { data = Enumerable.Range(0, payload.RootElement.GetProperty("input").GetArrayLength()).Select(i => new { index = i, embedding = new[] { 1.0, 0.0 } }) });
+        var modelInput = payload.RootElement.GetProperty("input").GetString()!;
+        Check(modelInput.Contains("README.md") && modelInput.Contains("Program.cs") && !modelInput.Contains("\\u044f"), "pipeline retrieves documentation/code and preserves Unicode token budget");
+        return Json(new { status = "completed", output = new[] { new { content = new[] { new { type = "output_text", text = "Существенных проблем в просмотренных изменениях не обнаружено" } } } } });
+    }));
+    await File.WriteAllTextAsync(input, JsonSerializer.Serialize(snapshot with { Files = [snapshot.Files[0] with { Content = new string('я', 20000) }] }));
+    exit = await ReviewCommand.RunAsync(["review", "--input", input, "--output", output], default, pipelineHttp);
+    Check(exit == 0 && (await File.ReadAllTextAsync(output)).Contains("Существенных проблем"), "complete RAG/LLM/comment pipeline handles large Cyrillic input");
+    var called = false;
+    using var forbiddenNetwork = new HttpClient(new Handler((_, _) => { called = true; throw new Exception("Unexpected network before budget validation"); }));
+    await File.WriteAllTextAsync(input, JsonSerializer.Serialize(snapshot with { Files = [snapshot.Files[0] with { Content = new string('я', 60000) }] }));
+    exit = await ReviewCommand.RunAsync(["review", "--input", input, "--output", output], default, forbiddenNetwork);
+    Check(exit == 0 && !called && (await File.ReadAllTextAsync(output)).Contains("превышает бюджет"), "oversized PR rejected before paid embedding calls");
+    await File.WriteAllTextAsync(input, JsonSerializer.Serialize(snapshot));
+    using var stopped = new CancellationTokenSource(); stopped.Cancel();
+    exit = await ReviewCommand.RunAsync(["review", "--input", input, "--output", output], stopped.Token, forbiddenNetwork);
+    Check(exit == 0 && !called && (await File.ReadAllTextAsync(output)).Contains("отменено"), "command cancellation writes diagnostic report and exits");
+    await File.WriteAllTextAsync(input, JsonSerializer.Serialize(snapshot with { HeadSha = "invalid" }));
+    exit = await ReviewCommand.RunAsync(["review", "--input", input, "--output", output], default);
+    Check(exit == 0 && (await File.ReadAllTextAsync(output)).Contains("Invalid review snapshot"), "snapshot validation errors remain non-blocking diagnostics");
     await File.WriteAllTextAsync(input, "{broken");
     exit = await ReviewCommand.RunAsync(["review", "--input", input, "--output", output], default);
     Check(exit == 0 && (await File.ReadAllTextAsync(output)).Contains("не выполнена"), "malformed snapshot does not claim successful review");
@@ -76,6 +103,7 @@ try
 finally
 {
     Environment.SetEnvironmentVariable("OPENAI_API_KEY", oldKey); Environment.SetEnvironmentVariable("BIMS_LLM_PROVIDER", oldProvider);
+    Environment.SetEnvironmentVariable("BIMS_EMBEDDING_DIMENSIONS", oldDimensions);
     Directory.Delete(fixture, true);
 }
 Console.WriteLine($"{passed} review checks passed.");

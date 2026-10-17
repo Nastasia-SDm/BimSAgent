@@ -56,7 +56,7 @@ test('publisher updates bot comment, suppresses mentions/images and skips stale 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bims-publish-review-'));
   try {
     process.env.PR_NUMBER = '1'; process.env.REVIEW_HEAD = 'current'; process.env.REVIEW_OUTPUT = path.join(root, 'review.md');
-    fs.writeFileSync(process.env.REVIEW_OUTPUT, 'review @someone ![image](https://example.invalid) <img src="x">');
+    fs.writeFileSync(process.env.REVIEW_OUTPUT, 'review @someone ![image](https://example.invalid) <img src="x"> `Task<T>` and `a < b && c > d`');
     const changes = [];
     const github = { rest: { pulls: { get: async () => ({ data: { state: 'open', head: { sha: 'current' } } }) }, issues: {
       listComments() {}, updateComment: async body => changes.push(body), createComment: async () => assert.fail('duplicate comment')
@@ -65,7 +65,25 @@ test('publisher updates bot comment, suppresses mentions/images and skips stale 
       core: { info() {}, notice() {}, warning() {} } };
     await publish(args);
     assert.equal(changes[0].comment_id, 12);
-    assert.ok(!changes[0].body.includes('@someone')); assert.ok(!changes[0].body.includes('![')); assert.ok(!changes[0].body.includes('<img'));
+    assert.ok(!changes[0].body.includes('@someone')); assert.ok(!changes[0].body.includes('![')); assert.ok(!changes[0].body.includes('<img')); assert.ok(changes[0].body.includes('Task<T>')); assert.ok(changes[0].body.includes('a < b && c > d'));
     process.env.REVIEW_HEAD = 'obsolete'; await publish(args); assert.equal(changes.length, 1);
   } finally { process.env = old; fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('publisher creates first diagnostic comment when review output is missing', async () => {
+  const old = { ...process.env };
+  try {
+    process.env.PR_NUMBER = '1'; process.env.REVIEW_HEAD = 'current'; delete process.env.REVIEW_OUTPUT;
+    let created;
+    const args = { github: { rest: {
+      pulls: { get: async () => ({ data: { state: 'open', head: { sha: 'current' } } }) },
+      issues: { listComments() {}, createComment: async value => created = value }
+    }, paginate: async () => [] },
+    context: { repo: { owner: 'owner', repo: 'repo' }, payload: {}, runId: 1, serverUrl: 'https://github.com' },
+    core: { info() {}, notice() {}, warning() {} } };
+    await publish(args);
+    assert.equal(created.issue_number, 1);
+    assert.match(created.body, /проверка не выполнена/);
+    assert.match(created.body, /PR не блокируется/);
+  } finally { process.env = old; }
 });

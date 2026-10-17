@@ -10,8 +10,8 @@ async function publish({ github, context, core }) {
   const output = process.env.REVIEW_OUTPUT;
   let body = output && fs.existsSync(output) ? fs.readFileSync(output, 'utf8') :
     '## BimSAgent AI review — проверка не выполнена\n\nОшибка подготовки, сборки или timeout. Подробности: лог workflow. Это не результат review; PR не блокируется.';
-  // Avoid mentions, image beacons and raw HTML emitted by model or repository text.
-  body = body.replace(/<[^>]*>/g, '').replace(/!\[/g, '[').replace(/@/g, '@\u200b');
+  // Avoid mentions and image beacons; GitHub sanitizes remaining Markdown/HTML. Preserve C# generics and comparisons.
+  body = body.replace(/<img\b[^>]*>/gi, '').replace(/!\[/g, '[').replace(/@/g, '@\u200b');
   const run = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
   body = `${marker}\n${body.slice(0, 50000)}\n\n[Лог workflow](${run})`;
   const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
