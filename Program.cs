@@ -28,6 +28,18 @@ if (args.Length > 0 && args[0].Equals("rag", StringComparison.OrdinalIgnoreCase)
     Environment.ExitCode = await RagCommands.RunAsync(args, shutdown.Token);
     return;
 }
+if (args.Length > 0 && args[0].Equals("help-index", StringComparison.OrdinalIgnoreCase))
+{
+    var projectRoot = Directory.GetCurrentDirectory();
+    var helpRagDirectory = Path.Combine(projectRoot, "help-rag-data");
+
+    Environment.ExitCode = await RagCommands.RunAsync(
+        ["rag", "index", projectRoot],
+        shutdown.Token,
+        dataDirectory: helpRagDirectory);
+
+    return;
+}
 
 BimSAgent loadedAgent;
 try
@@ -84,6 +96,12 @@ while (!shutdown.IsCancellationRequested)
         {
             try { await RagCommands.RunAsync(RagCommands.Split(input), shutdown.Token, activeTaskId: agent.ActiveTaskId); }
             catch (ArgumentException e) { Console.Error.WriteLine(e.Message); }
+            continue;
+        }
+        if (input.TrimStart().StartsWith("/help", StringComparison.OrdinalIgnoreCase))
+        {
+            try { await HelpCommands.HandleAsync(input, shutdown.Token); }
+            catch (Exception e) { Console.Error.WriteLine("/help: " + e.Message); }
             continue;
         }
         var profileParts = input.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -345,6 +363,12 @@ static async Task<string?> ReadUserInputAsync(CancellationToken cancellationToke
         if (input != null && input.TrimStart().StartsWith("family ", StringComparison.OrdinalIgnoreCase))
         {
             await FamilyLibraryCommands.RunAsync(RagCommands.Split(input), cancellationToken);
+            Console.Write("Продолжите ввод: ");
+            continue;
+        }
+        if (input != null && input.TrimStart().StartsWith("git-mcp-", StringComparison.OrdinalIgnoreCase))
+        {
+            await GitMcpCommands.HandleAsync(input.Trim(), cancellationToken);
             Console.Write("Продолжите ввод: ");
             continue;
         }

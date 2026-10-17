@@ -15,12 +15,16 @@ public sealed class DocxDocumentExtractor
     private static readonly Regex FamilyName = new(@"^[\p{L}\p{N}][\p{L}\p{N}_№.+()\-]*_[\p{L}\p{N}_№.+()\-]+$", RegexOptions.Compiled);
     private static readonly Regex FamilyField = new(@"(?:Имя|Название)\s+семейства\s*[:：]\s*([^\r\n;]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    public ExtractedDocument Extract(string path)
+   public ExtractedDocument Extract(string path)
     {
+        if (Directory.Exists(path))
+            return MarkdownDocumentExtractor.ExtractProjectDocumentation(path);
+        if (Path.GetExtension(path).Equals(".md", StringComparison.OrdinalIgnoreCase))
+            return MarkdownDocumentExtractor.Extract(path);
         if (Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
             return PdfDocumentExtractor.Extract(path);
         if (!Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("Ожидается документ .docx.");
+            throw new ArgumentException("Ожидается документ .docx, .pdf, .md или папка проекта.");
         var fullPath = Path.GetFullPath(path);
         // Read once: the hash and extracted text always describe the same document snapshot.
         var bytes = System.IO.File.ReadAllBytes(fullPath);

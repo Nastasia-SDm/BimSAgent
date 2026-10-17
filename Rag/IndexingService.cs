@@ -27,7 +27,7 @@ public sealed class IndexingService(DocxDocumentExtractor extractor, RagTokenize
         if (visionClient == null && !retryAssets && Matches(existingFixed) && Matches(existingStructural) && existingFixed!.BuildId == existingStructural!.BuildId)
             return (existingFixed.Chunks.Length, existingStructural.Chunks.Length, true);
 
-        if (!Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+        if (Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase))
         {
             document = await DocumentAssetProcessing.ProcessAsync(document, existingStructural?.Assets ?? [], assetProcessor, cancellationToken);
             document = await VisualIndexing.ProcessAsync(document, existingStructural?.Assets ?? [], visionClient, visionFamily, cancellationToken);
